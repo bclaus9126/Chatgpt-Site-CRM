@@ -48,7 +48,17 @@ const nav = [
   ["Communications", MessagesSquare],
   ["Settings", Settings],
 ] as const;
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const value = (type: string) =>
+    parts.find((part) => part.type === type)?.value;
+  return `${value("year")}-${value("month")}-${value("day")}`;
+};
 const money = (n: number) =>
   new Intl.NumberFormat("en-US", {
     style: "currency",
@@ -286,7 +296,27 @@ function Dashboard({
   go: (s: string) => void;
   act: (p: Rec) => void;
 }) {
-  const openTasks = data.tasks.filter((t) => t.status !== "Completed"),
+  const [clock, setClock] = useState(() => new Date());
+  useEffect(() => {
+    const timer = window.setInterval(() => setClock(new Date()), 60000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const centralDate = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Chicago",
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+    }).format(clock),
+    centralHour = Number(
+      new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/Chicago",
+        hour: "numeric",
+        hourCycle: "h23",
+      }).format(clock),
+    ),
+    greeting =
+      centralHour < 12 ? "morning" : centralHour < 17 ? "afternoon" : "evening",
+    openTasks = data.tasks.filter((t) => t.status !== "Completed"),
     due = openTasks.filter((t) => t.due_date === today()),
     over = openTasks.filter((t) => t.due_date < today());
   const cards = [
@@ -340,8 +370,8 @@ function Dashboard({
     <>
       <section className="welcome">
         <div>
-          <p>Friday, September 19</p>
-          <h2>Good evening, Brad.</h2>
+          <p>{centralDate}</p>
+          <h2>Good {greeting}, Brad.</h2>
           <span>Here’s who needs you next.</span>
         </div>
         <button className="ghost" onClick={() => go("Tasks")}>
