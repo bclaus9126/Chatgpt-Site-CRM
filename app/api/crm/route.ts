@@ -1,7 +1,301 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
-const samples=[["Maria","Santos","(210) 555-0142","maria.santos@example.com","Lead","Facebook Ad","Seller","Hot","Downsizing after her youngest moved out; wants a simple sale with time to relocate.","Less maintenance and being closer to her daughter.","Concerned about repairs and selling before finding her next home.","Prepare a net sheet and discuss a flexible leaseback.","Cibolo Home Value — September","Seller — Cibolo","Past client referral","Pool, single-story, low-maintenance yard","#seller,#cibolo,#downsizing"],["Jordan","Reed","(830) 555-0188","jordan.reed@example.com","Current client","Website","Buyer","Warm","Pre-approved first-time buyer focused on Schertz and Cibolo.","Needs space for a home office and fenced yard.","Payment sensitivity above $2,500 per month.","Send three payment-matched listings and confirm Saturday tour.","Organic search","Buyer — Schertz/Cibolo","Conventional","3+ bedrooms, office or flex room, fenced yard","#buyer,#first-time,#schertz"],["Denise","Walker","(210) 555-0166","denise.walker@example.com","Past client","Past Client","Buyer and Seller","Warm","Bought with Brad in 2021; considering moving to New Braunfels next spring.","More space for visiting family and a one-story layout.","Does not want to list until replacement options are clear.","Schedule annual equity review.","Client database","Move-up — New Braunfels","Conventional","Single-story, guest suite, quiet street","#past-client,#move-up,#new-braunfels"],["Marcus","Lee","(210) 555-0119","marcus.lee@example.com","Lead","Open House","Buyer","Cool","Met at the Arroyo Seco open house; early in the process.","Relocating closer to Randolph AFB.","Needs clarity on VA payment and closing-cost options.","Check in with lender update and offer a buyer consultation.","Arroyo Seco Open House","Buyer — Randolph area","VA","20-minute commute, newer build, 4 bedrooms","#buyer,#va,#relocation"],["Alicia","Nguyen","(210) 555-0125","alicia.nguyen@example.com","Sphere","Personal network","Seller","Hot","Inherited a rental in Schertz and wants to understand sell-versus-keep numbers.","Simplify the estate and free up capital.","Tenant lease runs through December.","Deliver rental-versus-sale analysis Friday.","Sphere","Investor disposition","Cash","Rental property at 1847 Creek Bend","#seller,#investor,#schertz"]];
-async function seed(db:D1Database){const row=await db.prepare("SELECT COUNT(*) count FROM contacts").first<{count:number}>();if((row?.count??0)>0)return;for(let i=0;i<samples.length;i++){const c=samples[i];const r=await db.prepare(`INSERT INTO contacts (first_name,last_name,phone,email,relationship,lead_source,intent,temperature,relationship_summary,motivation,concerns,recommended_next_action,campaign,lead_source_detail,financing_type,desired_property,tags,is_sample,last_meaningful_contact,next_follow_up,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,datetime('now', ?),datetime('now', ?),datetime('now', ?),datetime('now'))`).bind(...c,`-${i*3+1} days`,`${i===3?1:i-1} days`,`-${i*11+3} days`).run();const id=Number(r.meta.last_row_id);await db.batch([db.prepare("INSERT INTO activities (contact_id,type,title,detail,occurred_at,is_sample) VALUES (?,?,?,?,datetime('now', ?),1)").bind(id,"note",i===0?"Discussed timing and repair concerns":"Relationship update",c[8],`-${i+1} days`),db.prepare("INSERT INTO notes (contact_id,body,is_sample,created_at) VALUES (?,?,1,datetime('now', ?))").bind(id,c[8],`-${i+1} days`),db.prepare("INSERT INTO tasks (contact_id,title,type,due_date,due_time,priority,status,notes,is_sample) VALUES (?,?, 'Follow-up', date('now', ?), ?, ?, 'Open', ?,1)").bind(id,c[11],i===3?"+1 day":i===4?"-1 day":"+0 day",i%2?"14:00":"10:00",i===4?"High":"Normal",c[10]),db.prepare("INSERT INTO opportunities (contact_id,type,stage,estimated_price,estimated_commission,probability,expected_timeframe,property_address,notes,is_sample) VALUES (?,?,?,?,?,?,?,?,?,1)").bind(id,c[6],i===1?"Active Client":i===4?"Connected":"Nurture",[385000,425000,575000,350000,320000][i],[11550,12750,17250,10500,9600][i],[65,80,45,30,70][i],["60–90 days","30–60 days","Spring 2027","3–6 months","By year end"][i],i===4?"1847 Creek Bend, Schertz, TX":null,c[8])]);}}
-async function load(db:D1Database){await seed(db);const [contacts,opportunities,tasks,notes,communications,properties,activities]=await Promise.all([db.prepare("SELECT * FROM contacts ORDER BY CASE temperature WHEN 'Hot' THEN 1 WHEN 'Warm' THEN 2 ELSE 3 END,next_follow_up").all(),db.prepare("SELECT o.*,c.first_name||' '||c.last_name contact_name FROM opportunities o JOIN contacts c ON c.id=o.contact_id ORDER BY o.updated_at DESC").all(),db.prepare("SELECT t.*,c.first_name||' '||c.last_name contact_name FROM tasks t LEFT JOIN contacts c ON c.id=t.contact_id ORDER BY status='Completed',due_date,due_time").all(),db.prepare("SELECT * FROM notes ORDER BY created_at DESC").all(),db.prepare("SELECT * FROM communications ORDER BY occurred_at DESC").all(),db.prepare("SELECT * FROM properties ORDER BY created_at DESC").all(),db.prepare("SELECT * FROM activities ORDER BY occurred_at DESC").all()]);return{contacts:contacts.results,opportunities:opportunities.results,tasks:tasks.results,notes:notes.results,communications:communications.results,properties:properties.results,activities:activities.results};}
-export async function GET(){try{return NextResponse.json(await load(env.DB));}catch(e){console.error(e);return NextResponse.json({error:"CRM data is temporarily unavailable."},{status:500});}}
-export async function POST(req:Request){try{const b=await req.json(),db=env.DB;if(b.action==="completeTask")await db.prepare("UPDATE tasks SET status='Completed',completed_at=CURRENT_TIMESTAMP WHERE id=?").bind(b.id).run();if(b.action==="addNote"){const r=await db.prepare("INSERT INTO notes (contact_id,body) VALUES (?,?)").bind(b.contactId,b.body).run();await db.prepare("INSERT INTO activities (contact_id,type,title,detail,source_id) VALUES (?,'note','Note added',?,?)").bind(b.contactId,b.body,r.meta.last_row_id).run();await db.prepare("UPDATE contacts SET last_meaningful_contact=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(b.contactId).run();}if(b.action==="addTask")await db.prepare("INSERT INTO tasks (contact_id,title,type,due_date,due_time,priority,status,notes) VALUES (?,?,?,?,?,?,'Open',?)").bind(b.contactId,b.title,b.type||"Follow-up",b.dueDate,b.dueTime||null,b.priority||"Normal",b.notes||null).run();if(b.action==="addContact")await db.prepare("INSERT INTO contacts (first_name,last_name,phone,email,relationship,lead_source,intent,temperature,next_follow_up,recommended_next_action,tags) VALUES (?,?,?,?,?,?,?,?,?,?,?)").bind(b.firstName,b.lastName,b.phone||null,b.email||null,b.relationship||"Lead",b.leadSource||null,b.intent||"Unknown",b.temperature||"Warm",b.nextFollowUp||null,b.recommendedNextAction||null,b.tags||null).run();return NextResponse.json(await load(db));}catch(e){console.error(e);return NextResponse.json({error:"That change could not be saved. Try again."},{status:500});}}
+const samples = [
+  [
+    "Maria",
+    "Santos",
+    "(210) 555-0142",
+    "maria.santos@example.com",
+    "Lead",
+    "Facebook Ad",
+    "Seller",
+    "Hot",
+    "Downsizing after her youngest moved out; wants a simple sale with time to relocate.",
+    "Less maintenance and being closer to her daughter.",
+    "Concerned about repairs and selling before finding her next home.",
+    "Prepare a net sheet and discuss a flexible leaseback.",
+    "Cibolo Home Value — September",
+    "Seller — Cibolo",
+    "Past client referral",
+    "Pool, single-story, low-maintenance yard",
+    "#seller,#cibolo,#downsizing",
+  ],
+  [
+    "Jordan",
+    "Reed",
+    "(830) 555-0188",
+    "jordan.reed@example.com",
+    "Current client",
+    "Website",
+    "Buyer",
+    "Warm",
+    "Pre-approved first-time buyer focused on Schertz and Cibolo.",
+    "Needs space for a home office and fenced yard.",
+    "Payment sensitivity above $2,500 per month.",
+    "Send three payment-matched listings and confirm Saturday tour.",
+    "Organic search",
+    "Buyer — Schertz/Cibolo",
+    "Conventional",
+    "3+ bedrooms, office or flex room, fenced yard",
+    "#buyer,#first-time,#schertz",
+  ],
+  [
+    "Denise",
+    "Walker",
+    "(210) 555-0166",
+    "denise.walker@example.com",
+    "Past client",
+    "Past Client",
+    "Buyer and Seller",
+    "Warm",
+    "Bought with Brad in 2021; considering moving to New Braunfels next spring.",
+    "More space for visiting family and a one-story layout.",
+    "Does not want to list until replacement options are clear.",
+    "Schedule annual equity review.",
+    "Client database",
+    "Move-up — New Braunfels",
+    "Conventional",
+    "Single-story, guest suite, quiet street",
+    "#past-client,#move-up,#new-braunfels",
+  ],
+  [
+    "Marcus",
+    "Lee",
+    "(210) 555-0119",
+    "marcus.lee@example.com",
+    "Lead",
+    "Open House",
+    "Buyer",
+    "Cool",
+    "Met at the Arroyo Seco open house; early in the process.",
+    "Relocating closer to Randolph AFB.",
+    "Needs clarity on VA payment and closing-cost options.",
+    "Check in with lender update and offer a buyer consultation.",
+    "Arroyo Seco Open House",
+    "Buyer — Randolph area",
+    "VA",
+    "20-minute commute, newer build, 4 bedrooms",
+    "#buyer,#va,#relocation",
+  ],
+  [
+    "Alicia",
+    "Nguyen",
+    "(210) 555-0125",
+    "alicia.nguyen@example.com",
+    "Sphere",
+    "Personal network",
+    "Seller",
+    "Hot",
+    "Inherited a rental in Schertz and wants to understand sell-versus-keep numbers.",
+    "Simplify the estate and free up capital.",
+    "Tenant lease runs through December.",
+    "Deliver rental-versus-sale analysis Friday.",
+    "Sphere",
+    "Investor disposition",
+    "Cash",
+    "Rental property at 1847 Creek Bend",
+    "#seller,#investor,#schertz",
+  ],
+];
+async function seed(db: D1Database) {
+  const row = await db
+    .prepare("SELECT COUNT(*) count FROM contacts")
+    .first<{ count: number }>();
+  if ((row?.count ?? 0) > 0) return;
+  for (let i = 0; i < samples.length; i++) {
+    const c = samples[i];
+    const r = await db
+      .prepare(
+        `INSERT INTO contacts (first_name,last_name,phone,email,relationship,lead_source,intent,temperature,relationship_summary,motivation,concerns,recommended_next_action,campaign,lead_source_detail,financing_type,desired_property,tags,is_sample,last_meaningful_contact,next_follow_up,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,datetime('now', ?),datetime('now', ?),datetime('now', ?),datetime('now'))`,
+      )
+      .bind(
+        ...c,
+        `-${i * 3 + 1} days`,
+        `${i === 3 ? 1 : i - 1} days`,
+        `-${i * 11 + 3} days`,
+      )
+      .run();
+    const id = Number(r.meta.last_row_id);
+    await db.batch([
+      db
+        .prepare(
+          "INSERT INTO activities (contact_id,type,title,detail,occurred_at,is_sample) VALUES (?,?,?,?,datetime('now', ?),1)",
+        )
+        .bind(
+          id,
+          "note",
+          i === 0
+            ? "Discussed timing and repair concerns"
+            : "Relationship update",
+          c[8],
+          `-${i + 1} days`,
+        ),
+      db
+        .prepare(
+          "INSERT INTO notes (contact_id,body,is_sample,created_at) VALUES (?,?,1,datetime('now', ?))",
+        )
+        .bind(id, c[8], `-${i + 1} days`),
+      db
+        .prepare(
+          "INSERT INTO tasks (contact_id,title,type,due_date,due_time,priority,status,notes,is_sample) VALUES (?,?, 'Follow-up', date('now', ?), ?, ?, 'Open', ?,1)",
+        )
+        .bind(
+          id,
+          c[11],
+          i === 3 ? "+1 day" : i === 4 ? "-1 day" : "+0 day",
+          i % 2 ? "14:00" : "10:00",
+          i === 4 ? "High" : "Normal",
+          c[10],
+        ),
+      db
+        .prepare(
+          "INSERT INTO opportunities (contact_id,type,stage,estimated_price,estimated_commission,probability,expected_timeframe,property_address,notes,is_sample) VALUES (?,?,?,?,?,?,?,?,?,1)",
+        )
+        .bind(
+          id,
+          c[6],
+          i === 1 ? "Active Client" : i === 4 ? "Connected" : "Nurture",
+          [385000, 425000, 575000, 350000, 320000][i],
+          [11550, 12750, 17250, 10500, 9600][i],
+          [65, 80, 45, 30, 70][i],
+          [
+            "60–90 days",
+            "30–60 days",
+            "Spring 2027",
+            "3–6 months",
+            "By year end",
+          ][i],
+          i === 4 ? "1847 Creek Bend, Schertz, TX" : null,
+          c[8],
+        ),
+    ]);
+  }
+}
+async function load(db: D1Database) {
+  await seed(db);
+  const [
+    contacts,
+    opportunities,
+    tasks,
+    notes,
+    communications,
+    properties,
+    activities,
+  ] = await Promise.all([
+    db
+      .prepare(
+        "SELECT * FROM contacts ORDER BY CASE temperature WHEN 'Hot' THEN 1 WHEN 'Warm' THEN 2 ELSE 3 END,next_follow_up",
+      )
+      .all(),
+    db
+      .prepare(
+        "SELECT o.*,c.first_name||' '||c.last_name contact_name FROM opportunities o JOIN contacts c ON c.id=o.contact_id ORDER BY o.updated_at DESC",
+      )
+      .all(),
+    db
+      .prepare(
+        "SELECT t.*,c.first_name||' '||c.last_name contact_name FROM tasks t LEFT JOIN contacts c ON c.id=t.contact_id ORDER BY status='Completed',due_date,due_time",
+      )
+      .all(),
+    db.prepare("SELECT * FROM notes ORDER BY created_at DESC").all(),
+    db
+      .prepare(
+        `SELECT id,contact_id,type,direction,occurred_at,subject,message_transcript,duration_seconds,recording_id,ai_summary,call_outcome,follow_up_suggestion,external_provider_id,from_number,to_number,caller_number,destination_number,brad_cell_number,business_number,call_control_id,call_leg_id,related_call_leg_ids,started_at,answered_at,bridged_at,ended_at,status,is_sample FROM communications ORDER BY occurred_at DESC`,
+      )
+      .all(),
+    db.prepare("SELECT * FROM properties ORDER BY created_at DESC").all(),
+    db.prepare("SELECT * FROM activities ORDER BY occurred_at DESC").all(),
+  ]);
+  return {
+    contacts: contacts.results,
+    opportunities: opportunities.results,
+    tasks: tasks.results,
+    notes: notes.results,
+    communications: communications.results,
+    properties: properties.results,
+    activities: activities.results,
+  };
+}
+export async function GET() {
+  try {
+    return NextResponse.json(await load(env.DB));
+  } catch (e) {
+    console.error(e);
+    return NextResponse.json(
+      { error: "CRM data is temporarily unavailable." },
+      { status: 500 },
+    );
+  }
+}
+export async function POST(req: Request) {
+  try {
+    const b = (await req.json()) as Record<string, any>,
+      db = env.DB;
+    if (b.action === "completeTask")
+      await db
+        .prepare(
+          "UPDATE tasks SET status='Completed',completed_at=CURRENT_TIMESTAMP WHERE id=?",
+        )
+        .bind(b.id)
+        .run();
+    if (b.action === "addNote") {
+      const r = await db
+        .prepare("INSERT INTO notes (contact_id,body) VALUES (?,?)")
+        .bind(b.contactId, b.body)
+        .run();
+      await db
+        .prepare(
+          "INSERT INTO activities (contact_id,type,title,detail,source_id) VALUES (?,'note','Note added',?,?)",
+        )
+        .bind(b.contactId, b.body, r.meta.last_row_id)
+        .run();
+      await db
+        .prepare(
+          "UPDATE contacts SET last_meaningful_contact=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        )
+        .bind(b.contactId)
+        .run();
+    }
+    if (b.action === "addTask")
+      await db
+        .prepare(
+          "INSERT INTO tasks (contact_id,title,type,due_date,due_time,priority,status,notes) VALUES (?,?,?,?,?,?,'Open',?)",
+        )
+        .bind(
+          b.contactId,
+          b.title,
+          b.type || "Follow-up",
+          b.dueDate,
+          b.dueTime || null,
+          b.priority || "Normal",
+          b.notes || null,
+        )
+        .run();
+    if (b.action === "addContact")
+      await db
+        .prepare(
+          "INSERT INTO contacts (first_name,last_name,phone,email,relationship,lead_source,intent,temperature,next_follow_up,recommended_next_action,tags) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        )
+        .bind(
+          b.firstName,
+          b.lastName,
+          b.phone || null,
+          b.email || null,
+          b.relationship || "Lead",
+          b.leadSource || null,
+          b.intent || "Unknown",
+          b.temperature || "Warm",
+          b.nextFollowUp || null,
+          b.recommendedNextAction || null,
+          b.tags || null,
+        )
+        .run();
+    return NextResponse.json(await load(db));
+  } catch (e) {
+    console.error(e);
+    return NextResponse.json(
+      { error: "That change could not be saved. Try again." },
+      { status: 500 },
+    );
+  }
+}

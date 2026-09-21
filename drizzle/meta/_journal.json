@@ -15,6 +15,34 @@
       "when": 1789776649613,
       "tag": "0001_giant_madrox",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1790005627491,
+      "tag": "0002_handy_mysterio",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1790007602970,
+      "tag": "0003_square_mac_gargan",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1790016170666,
+      "tag": "0004_naive_namorita",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1790025341208,
+      "tag": "0005_early_aaron_stack",
+      "breakpoints": true
     }
   ]
 }
