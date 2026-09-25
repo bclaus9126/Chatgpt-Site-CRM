@@ -1,0 +1,1 @@
+ALTER TABLE `opportunities` ADD `ai_extracted` integer DEFAULT false NOT NULL;

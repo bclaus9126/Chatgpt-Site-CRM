@@ -1,9 +1,11 @@
+import { authorizeCrmOwner } from "@/lib/crm-auth";
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  const auth = await authorizeCrmOwner(); if (auth.denied) return auth.denied;
   try {
     const result = await env.DB.prepare(
       `SELECT id,event_id,event_type,call_control_id,call_leg_id,

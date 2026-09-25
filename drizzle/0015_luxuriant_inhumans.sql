@@ -1,0 +1,1 @@
+ALTER TABLE `microsoft_mail_connections` ADD `send_enabled` integer DEFAULT 0 NOT NULL;

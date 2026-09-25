@@ -1,3 +1,4 @@
+import { authorizeCrmOwner } from "@/lib/crm-auth";
 import { env, waitUntil } from "cloudflare:workers";
 import {
   BRAD_CELL,
@@ -9,16 +10,8 @@ import {
 
 export const dynamic = "force-dynamic";
 
-function authorized(request: Request) {
-  return (
-    request.headers.get("oai-authenticated-user-email")?.toLowerCase() ===
-    "brad@theclausteam.com"
-  );
-}
-
 export async function POST(request: Request) {
-  if (!authorized(request))
-    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  const auth = await authorizeCrmOwner(); if (auth.denied) return auth.denied;
   const body = (await request.json().catch(() => ({}))) as {
     contactId?: number;
   };

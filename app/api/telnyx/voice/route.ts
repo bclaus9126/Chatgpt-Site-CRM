@@ -2,10 +2,12 @@ import { env, waitUntil } from "cloudflare:workers";
 import {
   BRAD_CELL,
   BUSINESS_NUMBER,
+  bridgeCalls,
   decodeClientState,
   dialCall,
   normalizePhone,
 } from "@/lib/telnyx-call-control";
+import { saveCallAnalysis } from "@/lib/call-analysis";
 
 export const dynamic = "force-dynamic";
 type TelnyxEvent = {
@@ -35,6 +37,7 @@ const supportedEvents = new Set([
   "call.hangup",
   "call.bridged",
   "call.recording.saved",
+  "call.recording.transcription.saved",
 ]);
 
 function decodeBase64(value: string) {
@@ -58,7 +61,7 @@ function decodePublicKey(value: string) {
     throw new Error("Invalid Telnyx public key length");
   return decoded;
 }
-async function verifyTelnyxSignature(request: Request, rawBody: string) {
+export async function verifyTelnyxSignature(request: Request, rawBody: string) {
   const publicKey = (env as unknown as { TELNYX_PUBLIC_KEY?: string })
     .TELNYX_PUBLIC_KEY;
   if (!publicKey) {
@@ -272,7 +275,18 @@ async function findFlow(p: Record<string, unknown>) {
     };
   const session =
     typeof p.call_session_id === "string" ? p.call_session_id : null;
-  if (!session) return { flow: null, role: null };
+  if (!session) {
+    const recordingId =
+      typeof p.recording_id === "string" ? p.recording_id : null;
+    if (!recordingId) return { flow: null, role: null };
+    const recordingFlow =
+      (await env.DB.prepare(
+        `SELECT f.* FROM telnyx_call_flows f JOIN communications c ON c.id=f.communication_id WHERE c.recording_id=?`,
+      )
+        .bind(recordingId)
+        .first<Flow>()) ?? null;
+    return { flow: recordingFlow, role: null };
+  }
   const flow =
     (await env.DB.prepare(
       "SELECT * FROM telnyx_call_flows WHERE call_session_id=?",
@@ -300,6 +314,25 @@ async function addLeg(communicationId: number, legId: unknown) {
   )
     .bind(JSON.stringify(legs), communicationId)
     .run();
+}
+
+async function archiveCallRecording(communicationId: number, recordingId: string | null, url: string) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Could not archive call recording (${response.status})`);
+  const contentType = response.headers.get("content-type") || "audio/mpeg";
+  const key = `call-recordings/${communicationId}/${recordingId || crypto.randomUUID()}.mp3`;
+  await env.FILES.put(key, response.body, { httpMetadata: { contentType } });
+  await env.DB.prepare("UPDATE communications SET audio_object_key=?,audio_content_type=? WHERE id=?")
+    .bind(key, contentType, communicationId).run();
+}
+
+async function analyzeCallTranscript(flow: Flow, transcript: string, transcriptionCallControlId: string | null) {
+  const call = await env.DB.prepare(`SELECT c.occurred_at,c.message_transcript,TRIM(COALESCE(ct.first_name,'') || ' ' || COALESCE(ct.last_name,'')) contact_name
+    FROM communications c LEFT JOIN contacts ct ON ct.id=c.contact_id WHERE c.id=?`)
+    .bind(flow.communication_id).first<{ occurred_at: string; message_transcript: string | null; contact_name: string }>();
+  if (call?.message_transcript && call.message_transcript.length > transcript.length) return;
+  const recordingRole = transcriptionCallControlId === flow.brad_call_control_id ? "brad" : transcriptionCallControlId === flow.contact_call_control_id ? "contact" : null;
+  await saveCallAnalysis(env.DB, flow.communication_id, { transcript, contactName: call?.contact_name || "Contact", occurredAt: call?.occurred_at || new Date().toISOString(), recordingRole });
 }
 
 async function handleLifecycle(event: TelnyxEvent, webhookUrl: string) {
@@ -375,8 +408,78 @@ async function handleLifecycle(event: TelnyxEvent, webhookUrl: string) {
         ]);
       }
     }
+  } else if (
+    type === "call.answered" &&
+    role === "brad" &&
+    flow.direction === "incoming" &&
+    flow.primary_call_control_id
+  ) {
+    try {
+      await bridgeCalls({
+        callControlId: String(p.call_control_id),
+        targetCallControlId: flow.primary_call_control_id,
+        commandId: `${flow.id}:bridge`,
+      });
+      await env.DB.batch([
+        env.DB.prepare(
+          "UPDATE telnyx_call_flows SET status='Bridging',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        ).bind(flow.id),
+        env.DB.prepare(
+          "UPDATE communications SET answered_at=COALESCE(answered_at,?),status='Bridging' WHERE id=?",
+        ).bind(timestamp, flow.communication_id),
+      ]);
+      await saveControlEvent(event, "cell.route.bridge_requested", {
+        flow_id: flow.id,
+        inbound_call_control_id: flow.primary_call_control_id,
+        brad_call_control_id: p.call_control_id,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Could not bridge inbound call";
+      await env.DB.batch([
+        env.DB.prepare(
+          "UPDATE telnyx_call_flows SET status='Failed',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        ).bind(flow.id),
+        env.DB.prepare(
+          "UPDATE communications SET status='Failed',ended_at=? WHERE id=?",
+        ).bind(timestamp, flow.communication_id),
+      ]);
+      await saveControlEvent(event, "cell.route.bridge_failed", {
+        flow_id: flow.id,
+        reason: message,
+      });
+    }
+  } else if (
+    type === "call.answered" &&
+    role === "contact" &&
+    flow.direction === "outgoing" &&
+    flow.brad_call_control_id
+  ) {
+    try {
+      await bridgeCalls({
+        callControlId: String(p.call_control_id),
+        targetCallControlId: flow.brad_call_control_id,
+        commandId: `${flow.id}:bridge`,
+      });
+      await env.DB.batch([
+        env.DB.prepare("UPDATE telnyx_call_flows SET status='Bridging',updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(flow.id),
+        env.DB.prepare("UPDATE communications SET status='Bridging' WHERE id=?").bind(flow.communication_id),
+      ]);
+      await saveControlEvent(event, "outbound.bridge_requested", {
+        flow_id: flow.id,
+        contact_call_control_id: p.call_control_id,
+        brad_call_control_id: flow.brad_call_control_id,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not bridge outbound call";
+      await env.DB.batch([
+        env.DB.prepare("UPDATE telnyx_call_flows SET status='Failed',updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(flow.id),
+        env.DB.prepare("UPDATE communications SET status='Failed',ended_at=? WHERE id=?").bind(timestamp, flow.communication_id),
+      ]);
+      await saveControlEvent(event, "outbound.bridge_failed", { flow_id: flow.id, reason: message });
+    }
   } else if (type === "call.answered") {
-    const status = role === "contact" ? "Connected" : "Brad answered";
+    const status = role === "contact" ? "Contact answered" : "Brad answered";
     await env.DB.prepare(
       "UPDATE communications SET answered_at=COALESCE(answered_at,?),status=? WHERE id=?",
     )
@@ -431,6 +534,18 @@ async function handleLifecycle(event: TelnyxEvent, webhookUrl: string) {
         flow.communication_id,
       )
       .run();
+    if (url) await archiveCallRecording(flow.communication_id, recordingId, url);
+  }
+  if (type === "call.recording.transcription.saved") {
+    const transcript =
+      typeof p.transcription_text === "string"
+        ? p.transcription_text.trim()
+        : "";
+    if (transcript) {
+      await env.DB.prepare("UPDATE communications SET recording_id=COALESCE(recording_id,?) WHERE id=?")
+        .bind(typeof p.recording_id === "string" ? p.recording_id : null, flow.communication_id).run();
+      await analyzeCallTranscript(flow, transcript, typeof p.call_control_id === "string" ? p.call_control_id : null);
+    }
   }
 }
 export async function POST(request: Request) {

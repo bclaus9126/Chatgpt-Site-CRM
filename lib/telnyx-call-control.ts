@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 
-export const BRAD_CELL = "+12107878556";
-export const BUSINESS_NUMBER = "+17264657996";
+export const BRAD_CELL = String((env as unknown as Record<string, string>).BRAD_CELL || "");
+export const BUSINESS_NUMBER = String((env as unknown as Record<string, string>).TELNYX_BUSINESS_NUMBER || "");
 export const VOICE_CONNECTION_ID = "3053942566882903353";
 
 export type CallClientState = {
@@ -66,6 +66,18 @@ export async function dialCall(input: {
             record_channels: "dual",
             record_format: "mp3",
             record_track: "both",
+            transcription: true,
+            transcription_config: {
+              transcription_engine: "Google",
+              transcription_tracks: "both",
+              transcription_engine_config: {
+                transcription_engine: "Google",
+                language: "en",
+                enable_speaker_diarization: true,
+                min_speaker_count: 2,
+                max_speaker_count: 2,
+              },
+            },
           }
         : {}),
     }),
@@ -88,4 +100,41 @@ export async function dialCall(input: {
     throw new Error(`Telnyx could not start the call (${response.status})`);
   }
   return result.data;
+}
+
+export async function bridgeCalls(input: {
+  callControlId: string;
+  targetCallControlId: string;
+  commandId: string;
+}) {
+  const apiKey = (env as unknown as { TELNYX_API_KEY?: string }).TELNYX_API_KEY;
+  if (!apiKey) throw new Error("TELNYX_API_KEY is not configured");
+  const response = await fetch(
+    `https://api.telnyx.com/v2/calls/${encodeURIComponent(input.callControlId)}/actions/bridge`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        call_control_id: input.targetCallControlId,
+        command_id: input.commandId,
+      }),
+    },
+  );
+  const result = (await response.json().catch(() => null)) as {
+    data?: { result?: string };
+    errors?: unknown;
+  } | null;
+  if (!response.ok) {
+    console.error("Telnyx bridge failed", {
+      callControlId: input.callControlId,
+      targetCallControlId: input.targetCallControlId,
+      status: response.status,
+      errors: result?.errors,
+    });
+    throw new Error(`Telnyx could not bridge the call (${response.status})`);
+  }
+  return result?.data;
 }

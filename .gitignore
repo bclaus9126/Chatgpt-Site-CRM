@@ -30,6 +30,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # vercel
 .vercel
@@ -37,6 +38,7 @@ yarn-error.log*
 # typescript
 next-env.d.ts
 /dist/
+*.tsbuildinfo
 /.wrangler/
 # Checkout-local execution profile and tool state; never publish them.
 /.sites-runtime/
@@ -44,3 +46,14 @@ next-env.d.ts
 /.codex/
 /outputs/
 /work/
+# CRM records and local exports are never source files.
+*.csv
+*.tsv
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.jsonl
+/data/
+/exports/
+/backups/

@@ -1,178 +1,10 @@
+import { authorizeCrmOwner } from "@/lib/crm-auth";
 import { env } from "cloudflare:workers";
+import { relationshipOptions, intentOptions, stageOptions, fromFubStage } from "@/lib/contact-classification";
 import { NextResponse } from "next/server";
-const samples = [
-  [
-    "Maria",
-    "Santos",
-    "(210) 555-0142",
-    "maria.santos@example.com",
-    "Lead",
-    "Facebook Ad",
-    "Seller",
-    "Hot",
-    "Downsizing after her youngest moved out; wants a simple sale with time to relocate.",
-    "Less maintenance and being closer to her daughter.",
-    "Concerned about repairs and selling before finding her next home.",
-    "Prepare a net sheet and discuss a flexible leaseback.",
-    "Cibolo Home Value — September",
-    "Seller — Cibolo",
-    "Past client referral",
-    "Pool, single-story, low-maintenance yard",
-    "#seller,#cibolo,#downsizing",
-  ],
-  [
-    "Jordan",
-    "Reed",
-    "(830) 555-0188",
-    "jordan.reed@example.com",
-    "Current client",
-    "Website",
-    "Buyer",
-    "Warm",
-    "Pre-approved first-time buyer focused on Schertz and Cibolo.",
-    "Needs space for a home office and fenced yard.",
-    "Payment sensitivity above $2,500 per month.",
-    "Send three payment-matched listings and confirm Saturday tour.",
-    "Organic search",
-    "Buyer — Schertz/Cibolo",
-    "Conventional",
-    "3+ bedrooms, office or flex room, fenced yard",
-    "#buyer,#first-time,#schertz",
-  ],
-  [
-    "Denise",
-    "Walker",
-    "(210) 555-0166",
-    "denise.walker@example.com",
-    "Past client",
-    "Past Client",
-    "Buyer and Seller",
-    "Warm",
-    "Bought with Brad in 2021; considering moving to New Braunfels next spring.",
-    "More space for visiting family and a one-story layout.",
-    "Does not want to list until replacement options are clear.",
-    "Schedule annual equity review.",
-    "Client database",
-    "Move-up — New Braunfels",
-    "Conventional",
-    "Single-story, guest suite, quiet street",
-    "#past-client,#move-up,#new-braunfels",
-  ],
-  [
-    "Marcus",
-    "Lee",
-    "(210) 555-0119",
-    "marcus.lee@example.com",
-    "Lead",
-    "Open House",
-    "Buyer",
-    "Cool",
-    "Met at the Arroyo Seco open house; early in the process.",
-    "Relocating closer to Randolph AFB.",
-    "Needs clarity on VA payment and closing-cost options.",
-    "Check in with lender update and offer a buyer consultation.",
-    "Arroyo Seco Open House",
-    "Buyer — Randolph area",
-    "VA",
-    "20-minute commute, newer build, 4 bedrooms",
-    "#buyer,#va,#relocation",
-  ],
-  [
-    "Alicia",
-    "Nguyen",
-    "(210) 555-0125",
-    "alicia.nguyen@example.com",
-    "Sphere",
-    "Personal network",
-    "Seller",
-    "Hot",
-    "Inherited a rental in Schertz and wants to understand sell-versus-keep numbers.",
-    "Simplify the estate and free up capital.",
-    "Tenant lease runs through December.",
-    "Deliver rental-versus-sale analysis Friday.",
-    "Sphere",
-    "Investor disposition",
-    "Cash",
-    "Rental property at 1847 Creek Bend",
-    "#seller,#investor,#schertz",
-  ],
-];
-async function seed(db: D1Database) {
-  const row = await db
-    .prepare("SELECT COUNT(*) count FROM contacts")
-    .first<{ count: number }>();
-  if ((row?.count ?? 0) > 0) return;
-  for (let i = 0; i < samples.length; i++) {
-    const c = samples[i];
-    const r = await db
-      .prepare(
-        `INSERT INTO contacts (first_name,last_name,phone,email,relationship,lead_source,intent,temperature,relationship_summary,motivation,concerns,recommended_next_action,campaign,lead_source_detail,financing_type,desired_property,tags,is_sample,last_meaningful_contact,next_follow_up,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,datetime('now', ?),datetime('now', ?),datetime('now', ?),datetime('now'))`,
-      )
-      .bind(
-        ...c,
-        `-${i * 3 + 1} days`,
-        `${i === 3 ? 1 : i - 1} days`,
-        `-${i * 11 + 3} days`,
-      )
-      .run();
-    const id = Number(r.meta.last_row_id);
-    await db.batch([
-      db
-        .prepare(
-          "INSERT INTO activities (contact_id,type,title,detail,occurred_at,is_sample) VALUES (?,?,?,?,datetime('now', ?),1)",
-        )
-        .bind(
-          id,
-          "note",
-          i === 0
-            ? "Discussed timing and repair concerns"
-            : "Relationship update",
-          c[8],
-          `-${i + 1} days`,
-        ),
-      db
-        .prepare(
-          "INSERT INTO notes (contact_id,body,is_sample,created_at) VALUES (?,?,1,datetime('now', ?))",
-        )
-        .bind(id, c[8], `-${i + 1} days`),
-      db
-        .prepare(
-          "INSERT INTO tasks (contact_id,title,type,due_date,due_time,priority,status,notes,is_sample) VALUES (?,?, 'Follow-up', date('now', ?), ?, ?, 'Open', ?,1)",
-        )
-        .bind(
-          id,
-          c[11],
-          i === 3 ? "+1 day" : i === 4 ? "-1 day" : "+0 day",
-          i % 2 ? "14:00" : "10:00",
-          i === 4 ? "High" : "Normal",
-          c[10],
-        ),
-      db
-        .prepare(
-          "INSERT INTO opportunities (contact_id,type,stage,estimated_price,estimated_commission,probability,expected_timeframe,property_address,notes,is_sample) VALUES (?,?,?,?,?,?,?,?,?,1)",
-        )
-        .bind(
-          id,
-          c[6],
-          i === 1 ? "Active Client" : i === 4 ? "Connected" : "Nurture",
-          [385000, 425000, 575000, 350000, 320000][i],
-          [11550, 12750, 17250, 10500, 9600][i],
-          [65, 80, 45, 30, 70][i],
-          [
-            "60–90 days",
-            "30–60 days",
-            "Spring 2027",
-            "3–6 months",
-            "By year end",
-          ][i],
-          i === 4 ? "1847 Creek Bend, Schertz, TX" : null,
-          c[8],
-        ),
-    ]);
-  }
-}
+import { syncAppointment } from "@/lib/microsoft/calendar";
+import { formatContactAddress } from "@/lib/contact-address";
 async function load(db: D1Database) {
-  await seed(db);
   const [
     contacts,
     opportunities,
@@ -181,6 +13,10 @@ async function load(db: D1Database) {
     communications,
     properties,
     activities,
+    relationships,
+    intelligence,
+    relationshipMoments,
+    communicationSuggestions,
   ] = await Promise.all([
     db
       .prepare(
@@ -200,11 +36,15 @@ async function load(db: D1Database) {
     db.prepare("SELECT * FROM notes ORDER BY created_at DESC").all(),
     db
       .prepare(
-        `SELECT id,contact_id,type,direction,occurred_at,subject,message_transcript,duration_seconds,recording_id,ai_summary,call_outcome,follow_up_suggestion,external_provider_id,from_number,to_number,caller_number,destination_number,brad_cell_number,business_number,call_control_id,call_leg_id,related_call_leg_ids,started_at,answered_at,bridged_at,ended_at,status,is_sample FROM communications ORDER BY occurred_at DESC`,
+        `SELECT id,contact_id,type,direction,occurred_at,subject,message_transcript,duration_seconds,recording_id,ai_summary,call_outcome,follow_up_suggestion,external_provider_id,from_number,to_number,caller_number,destination_number,brad_cell_number,business_number,call_control_id,call_leg_id,related_call_leg_ids,started_at,answered_at,bridged_at,ended_at,status,audio_object_key,audio_content_type,interaction_type,author_name,participants,imported,original_imported_text,transcription_status,transcript_timestamps,analysis_status,source_system,source_record_id,is_sample FROM communications ORDER BY occurred_at DESC`,
       )
       .all(),
     db.prepare("SELECT * FROM properties ORDER BY created_at DESC").all(),
     db.prepare("SELECT * FROM activities ORDER BY occurred_at DESC").all(),
+    db.prepare("SELECT * FROM contact_relationships ORDER BY id DESC").all(),
+    db.prepare("SELECT * FROM contact_intelligence WHERE status='Current' ORDER BY source_date DESC,id DESC").all(),
+    db.prepare("SELECT * FROM relationship_moments ORDER BY date_value").all(),
+    db.prepare("SELECT * FROM communication_suggestions ORDER BY id").all(),
   ]);
   return {
     contacts: contacts.results,
@@ -214,9 +54,14 @@ async function load(db: D1Database) {
     communications: communications.results,
     properties: properties.results,
     activities: activities.results,
+    relationships: relationships.results,
+    intelligence: intelligence.results,
+    relationshipMoments: relationshipMoments.results,
+    communicationSuggestions: communicationSuggestions.results,
   };
 }
 export async function GET() {
+  const auth = await authorizeCrmOwner(); if (auth.denied) return auth.denied;
   try {
     return NextResponse.json(await load(env.DB));
   } catch (e) {
@@ -228,9 +73,67 @@ export async function GET() {
   }
 }
 export async function POST(req: Request) {
+  const auth = await authorizeCrmOwner(); if (auth.denied) return auth.denied;
   try {
     const b = (await req.json()) as Record<string, any>,
       db = env.DB;
+    const fields = (names: string[]) => Object.fromEntries(names.map(name => [name, b[name] === "" ? null : b[name] ?? null]));
+    const save = async (table: "contacts" | "tasks" | "opportunities", id: number, changes: Record<string, unknown>) => {
+      const keys = Object.keys(changes);
+      await db.prepare(`UPDATE ${table} SET ${keys.map(k => `${k}=?`).join(",")},updated_at=CURRENT_TIMESTAMP,updated_by='Brad Claus',update_source='manual' WHERE id=?`)
+        .bind(...keys.map(k => changes[k]), id).run();
+    };
+    const validEmail = (value: unknown) => !value || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value));
+    const validPhone = (value: unknown) => !value || /^[+()\d.\s-]{7,24}$/.test(String(value));
+    if (b.action === "editContact") {
+      if (!Number.isInteger(b.id) || !String(b.first_name || "").trim() || !String(b.last_name || "").trim() || !validEmail(b.email) || !validPhone(b.phone)) return NextResponse.json({error:"Check name, phone and email."},{status:400});
+      const extras = (raw: unknown, validator: (v: unknown) => boolean) => String(raw || "").split("\n").map(v => v.trim()).filter(Boolean).every(v => validator(v.split("|")[0].trim()));
+      if (!extras(b.additional_phones, validPhone) || !extras(b.additional_emails, validEmail)) return NextResponse.json({error:"Check additional phone numbers and email addresses."},{status:400});
+      const keys = ["first_name","last_name","display_name","phone","additional_phones","phone_type","email","additional_emails","email_type","address","property_address","relationship","intent","stage","lead_source","temperature","tags","birthday","spouse_name","contextual_notes"];
+      const changes = fields(keys);
+      if (["addressStreet","addressCity","addressState","addressZip","addressCountry"].some(key => key in b)) {
+        const existing = await db.prepare("SELECT address FROM contacts WHERE id=?").bind(b.id).first<{address:string|null}>();
+        const formatted = formatContactAddress(b);
+        // An untouched legacy address remains byte-for-byte intact.
+        changes.address = b.originalAddress === existing?.address && b.addressEdited !== true ? existing?.address : formatted || null;
+      }
+      await save("contacts", b.id, changes);
+    }
+    if (b.action === "saveAppointment" || b.action === "saveTask") {
+      if (!Number.isInteger(b.contactId) || !String(b.title || "").trim()) return NextResponse.json({error:"Choose a contact and title."},{status:400});
+      const appointment = b.action === "saveAppointment";
+      if (appointment && !/^\d{4}-\d{2}-\d{2}$/.test(String(b.dueDate || ""))) return NextResponse.json({error:"Choose a date."},{status:400});
+      const details = JSON.stringify({precision:b.precision || (b.dueTime ? "exact" : "date only"),endTime:b.endTime || null,daypart:b.daypart || null,location:b.location || null,propertyAddress:b.propertyAddress || null,reminder:b.reminder || null,commitment:!!b.commitment,inviteContact:!!b.inviteContact});
+      if (appointment && b.precision === "exact" && (!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(b.dueTime||"")) || b.endTime && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(b.endTime)))) return NextResponse.json({error:"Enter a valid start and end time."},{status:400});
+      if (appointment && b.inviteContact) { const contact=await db.prepare("SELECT email FROM contacts WHERE id=?").bind(b.contactId).first<{email:string|null}>(); if(!contact?.email) return NextResponse.json({error:"Add the contact's email before inviting them."},{status:400}); }
+      if (b.id) await save("tasks", Number(b.id), {title:b.title,type:appointment?"Appointment":b.type||"Task",due_date:b.dueDate||null,due_time:b.precision === "exact" ? b.dueTime||null : null,status:b.status||"Open",notes:b.notes||null,details});
+      else { const created=await db.prepare("INSERT INTO tasks (contact_id,title,type,due_date,due_time,status,notes,details,source_system,update_source,updated_by,created_at) VALUES (?,?,?,?,?,?,?,?, 'manual','manual','Brad Claus',CURRENT_TIMESTAMP)").bind(b.contactId,b.title,appointment?"Appointment":b.type||"Task",b.dueDate||null,b.precision === "exact"?b.dueTime||null:null,b.status||"Open",b.notes||null,details).run(); b.id=created.meta.last_row_id; }
+      if (appointment) await syncAppointment(Number(b.id));
+    }
+    if (b.action === "saveTransaction") {
+      if (!Number.isInteger(b.contactId) || !["Buyer","Seller"].includes(b.type) || !String(b.stage||"").trim()) return NextResponse.json({error:"Choose a contact, type and stage."},{status:400});
+      const detailKeys = ["assignedAgent","createdDate","listPrice","currentPrice","mlsNumber","listingDate","bedrooms","bathrooms","squareFootage","lotSize","yearBuilt","mortgageBalance","sellerPriceExpectation","expectedNetProceeds","closingDate","commission","offerPrice","contractPrice","purchasePrice","earnestMoney","optionFee","financingType","lender","preApprovalAmount"];
+      const details = JSON.stringify(Object.fromEntries(detailKeys.map(k => [k,b[k]||null])));
+      const changes = {contact_id:b.contactId,type:b.type,stage:b.stage,property_address:b.propertyAddress||null,estimated_price:Number(b.currentPrice||b.contractPrice||b.listPrice||b.offerPrice)||null,notes:b.notes||null,details};
+      if (b.id) await save("opportunities",Number(b.id),changes);
+      else await db.prepare("INSERT INTO opportunities (contact_id,type,stage,property_address,estimated_price,notes,details,source_system,update_source,updated_by) VALUES (?,?,?,?,?,?,?,'manual','manual','Brad Claus')").bind(...Object.values(changes)).run();
+    }
+    if (b.action === "updateClassification") {
+      const options: Record<string, readonly string[]> = { relationship: relationshipOptions, intent: intentOptions, stage: stageOptions };
+      if (!options[b.field]?.includes(b.value) || !Number.isInteger(b.contactId)) return NextResponse.json({ error: "Invalid contact classification" }, { status: 400 });
+      await db.prepare(`UPDATE contacts SET ${b.field}=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(b.value, b.contactId).run();
+    }
+    if (b.action === "normalizeFubClassifications") {
+      const imported = await db.prepare("SELECT r.contact_id,r.raw_json,c.relationship,c.intent,c.stage FROM import_rows r JOIN contacts c ON c.id=r.contact_id WHERE r.status='Imported' AND c.source_system='follow_up_boss'").all<Record<string,any>>();
+      for (const row of imported.results) {
+        let source: Record<string,string>; try { source = JSON.parse(row.raw_json); } catch { continue; }
+        const oldStage = source.Stage || "", mapped = fromFubStage(oldStage);
+        // Update only the exact values set by the old importer. Manual edits remain untouched.
+        if (row.relationship !== "Lead" || row.intent !== oldStage || row.stage !== oldStage) continue;
+        if (!mapped.stage && !["Past Client", "Sphere"].includes(mapped.relationship)) continue;
+        await db.prepare("UPDATE contacts SET relationship=?,intent='None / Unknown',stage=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND relationship='Lead' AND intent=? AND stage=?").bind(mapped.relationship, mapped.stage, row.contact_id, oldStage, oldStage).run();
+      }
+    }
     if (b.action === "completeTask")
       await db
         .prepare(
@@ -238,9 +141,21 @@ export async function POST(req: Request) {
         )
         .bind(b.id)
         .run();
+    if (b.action === "completeFollowUp" || b.action === "rescheduleFollowUp") {
+      if (!Number.isInteger(b.contactId) || (b.action === "rescheduleFollowUp" && !/^\d{4}-\d{2}-\d{2}$/.test(String(b.dueDate || "")))) return NextResponse.json({error:"Invalid follow-up"},{status:400});
+      await db.prepare("UPDATE contacts SET next_follow_up=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
+        .bind(b.action === "completeFollowUp" ? null : b.dueDate,b.contactId).run();
+    }
+    if (b.action === "rescheduleTask") {
+      if (!Number.isInteger(b.id) || !/^\d{4}-\d{2}-\d{2}$/.test(String(b.dueDate || ""))) return NextResponse.json({error:"Invalid task date"},{status:400});
+      const existing = await db.prepare("SELECT type FROM tasks WHERE id=?").bind(b.id).first<{type:string}>();
+      if (!existing) return NextResponse.json({error:"Task not found"},{status:404});
+      await db.prepare("UPDATE tasks SET due_date=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(b.dueDate,b.id).run();
+      if (existing.type === "Appointment") await syncAppointment(b.id);
+    }
     if (b.action === "addNote") {
       const r = await db
-        .prepare("INSERT INTO notes (contact_id,body) VALUES (?,?)")
+        .prepare("INSERT INTO notes (contact_id,body,created_at) VALUES (?,?,CURRENT_TIMESTAMP)")
         .bind(b.contactId, b.body)
         .run();
       await db
@@ -259,7 +174,7 @@ export async function POST(req: Request) {
     if (b.action === "addTask")
       await db
         .prepare(
-          "INSERT INTO tasks (contact_id,title,type,due_date,due_time,priority,status,notes) VALUES (?,?,?,?,?,?,'Open',?)",
+          "INSERT INTO tasks (contact_id,title,type,due_date,due_time,priority,status,notes,created_at) VALUES (?,?,?,?,?,?,'Open',?,CURRENT_TIMESTAMP)",
         )
         .bind(
           b.contactId,
@@ -271,19 +186,36 @@ export async function POST(req: Request) {
           b.notes || null,
         )
         .run();
+    if (b.action === "updateTags") {
+      const tags = Array.isArray(b.tags)
+        ? b.tags
+            .map((tag: unknown) => String(tag).trim())
+            .filter(Boolean)
+            .slice(0, 50)
+            .join(",")
+        : "";
+      await db
+        .prepare(
+          "UPDATE contacts SET tags=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        )
+        .bind(tags || null, b.contactId)
+        .run();
+    }
     if (b.action === "addContact")
       await db
         .prepare(
-          "INSERT INTO contacts (first_name,last_name,phone,email,relationship,lead_source,intent,temperature,next_follow_up,recommended_next_action,tags) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+          "INSERT INTO contacts (first_name,last_name,phone,email,address,relationship,lead_source,intent,stage,temperature,next_follow_up,recommended_next_action,tags) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(
           b.firstName,
           b.lastName,
           b.phone || null,
           b.email || null,
+          formatContactAddress(b) || null,
           b.relationship || "Lead",
           b.leadSource || null,
-          b.intent || "Unknown",
+          b.intent || "None / Unknown",
+          stageOptions.includes(b.stage) ? b.stage : "Lead",
           b.temperature || "Warm",
           b.nextFollowUp || null,
           b.recommendedNextAction || null,

@@ -43,6 +43,97 @@
       "when": 1790025341208,
       "tag": "0005_early_aaron_stack",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1790041145433,
+      "tag": "0006_good_warhawk",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1790104224494,
+      "tag": "0007_slimy_dakota_north",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1790104244049,
+      "tag": "0008_reflective_wolf_cub",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1790104274367,
+      "tag": "0009_spotty_wildside",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1790114763807,
+      "tag": "0010_foamy_steve_rogers",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1790181088038,
+      "tag": "0011_appointment_precision",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1790196398983,
+      "tag": "0012_great_peter_parker",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1790262267417,
+      "tag": "0013_strong_silver_centurion",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1790266606845,
+      "tag": "0014_numerous_clea",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "6",
+      "when": 1790267321163,
+      "tag": "0015_luxuriant_inhumans",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1790270434237,
+      "tag": "0016_smiling_cobalt_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1790290899952,
+      "tag": "0017_eminent_rogue",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1790291464390,
+      "tag": "0018_marvelous_owl",
+      "breakpoints": true
     }
   ]
 }
