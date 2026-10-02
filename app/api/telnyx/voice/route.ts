@@ -1,4 +1,6 @@
+import { stopContact } from "@/lib/campaign";
 import { env, waitUntil } from "cloudflare:workers";
+import { indexPending } from "@/lib/claus-ai/indexer";
 import {
   BRAD_CELL,
   BUSINESS_NUMBER,
@@ -8,6 +10,7 @@ import {
   normalizePhone,
 } from "@/lib/telnyx-call-control";
 import { saveCallAnalysis } from "@/lib/call-analysis";
+import { sendCallNotice } from "@/lib/telnyx-call-notice";
 
 export const dynamic = "force-dynamic";
 type TelnyxEvent = {
@@ -61,19 +64,25 @@ function decodePublicKey(value: string) {
     throw new Error("Invalid Telnyx public key length");
   return decoded;
 }
-export async function verifyTelnyxSignature(request: Request, rawBody: string) {
+export async function verifyTelnyxSignature(request: Request, rawBody: Uint8Array) {
   const publicKey = (env as unknown as { TELNYX_PUBLIC_KEY?: string })
     .TELNYX_PUBLIC_KEY;
-  if (!publicKey) {
-    console.error("TELNYX_PUBLIC_KEY is not configured; rejecting webhook");
-    return false;
-  }
   const signature = request.headers.get("telnyx-signature-ed25519"),
     timestamp = request.headers.get("telnyx-timestamp");
-  if (!signature || !timestamp) return false;
-  const seconds = Number(timestamp);
-  if (!Number.isFinite(seconds) || Math.abs(Date.now() / 1000 - seconds) > 300)
+  const keyFormat = !publicKey ? "missing" : /^[0-9a-f]{64}$/i.test(publicKey) ? "hex" : /^[A-Za-z0-9+/]{43}=$/.test(publicKey) ? "base64" : "invalid";
+  const diagnostics = { signaturePresent: Boolean(signature), timestampPresent: Boolean(timestamp), bodyBytes: rawBody.byteLength,
+    timestamp: timestamp ?? null, keyFormat, keyHasWhitespace: Boolean(publicKey && /\s/.test(publicKey)),
+    keyHasQuotes: Boolean(publicKey && /^["']|["']$/.test(publicKey)) };
+  const reject = (reason: string) => {
+    console.warn("Telnyx webhook signature rejected", { ...diagnostics, reason });
     return false;
+  };
+  if (!publicKey) return reject("public_key_missing");
+  if (keyFormat === "invalid") return reject("public_key_format_invalid");
+  if (!signature || !timestamp) return reject("signature_header_missing");
+  const seconds = Number(timestamp);
+  if (!Number.isFinite(seconds)) return reject("timestamp_invalid");
+  if (Math.abs(Date.now() / 1000 - seconds) > 300) return reject("timestamp_outside_replay_window");
   try {
     const key = await crypto.subtle.importKey(
       "raw",
@@ -82,15 +91,31 @@ export async function verifyTelnyxSignature(request: Request, rawBody: string) {
       false,
       ["verify"],
     );
-    return crypto.subtle.verify(
+    const prefix = new TextEncoder().encode(`${timestamp}|`);
+    const signedPayload = new Uint8Array(prefix.byteLength + rawBody.byteLength);
+    signedPayload.set(prefix);
+    signedPayload.set(rawBody, prefix.byteLength);
+    const verifiedLegacy = await crypto.subtle.verify(
       "Ed25519",
       key,
       decodeBase64(signature),
-      new TextEncoder().encode(`${timestamp}|${rawBody}`),
+      signedPayload,
     );
+    if (verifiedLegacy) return true;
+    // Newer Telnyx deliveries also include Standard Webhooks metadata. Their
+    // Ed25519 signature covers the webhook ID as well as the timestamp/body.
+    const webhookId = request.headers.get("webhook-id");
+    const webhookTimestamp = request.headers.get("webhook-timestamp");
+    const webhookSignature = request.headers.get("webhook-signature");
+    if (!webhookId || webhookTimestamp !== timestamp || !webhookSignature || webhookSignature !== signature) return reject("ed25519_signature_mismatch");
+    const standardPrefix = new TextEncoder().encode(`${webhookId}.${timestamp}.`);
+    const standardPayload = new Uint8Array(standardPrefix.byteLength + rawBody.byteLength);
+    standardPayload.set(standardPrefix);
+    standardPayload.set(rawBody, standardPrefix.byteLength);
+    if (await crypto.subtle.verify("Ed25519", key, decodeBase64(webhookSignature), standardPayload)) return true;
+    return reject("ed25519_signature_mismatch_both_formats");
   } catch (error) {
-    console.error("Telnyx signature verification failed", error);
-    return false;
+    return reject(error instanceof Error ? `verification_error_${error.name}` : "verification_error_unknown");
   }
 }
 async function saveVoiceEvent(event: TelnyxEvent) {
@@ -139,13 +164,12 @@ async function saveControlEvent(
     .run();
 }
 async function contactForPhone(phone: string | null) {
-  if (!phone) return null;
+  if (!phone) return [];
   const contacts = await env.DB.prepare(
-    "SELECT id,phone FROM contacts WHERE phone IS NOT NULL",
-  ).all<{ id: number; phone: string }>();
-  return (
-    contacts.results.find((c) => normalizePhone(c.phone) === phone)?.id ?? null
-  );
+    "SELECT id,first_name,last_name,phone FROM contacts",
+  ).all<{ id: number; first_name: string; last_name: string; phone: string }>();
+  const methods = await env.DB.prepare("SELECT contact_id FROM contact_methods WHERE kind='phone' AND normalized_value=?").bind(phone).all<{contact_id:number}>();
+  return contacts.results.filter(c => normalizePhone(c.phone) === phone || methods.results.some(m => m.contact_id === c.id));
 }
 
 async function createInboundFlow(
@@ -167,7 +191,8 @@ async function createInboundFlow(
     .first<Flow>();
   if (existing) return existing;
   const flowId = `inbound:${callSessionId}`,
-    contactId = await contactForPhone(caller),
+    matches = await contactForPhone(caller),
+    contactId = matches.length === 1 ? matches[0].id : null,
     startedAt =
       event.data?.occurred_at ??
       (typeof p.start_time === "string"
@@ -195,7 +220,7 @@ async function createInboundFlow(
       JSON.stringify(p.call_leg_id ? [p.call_leg_id] : []),
       startedAt,
       "Calling Brad",
-      contactId ? "Inbound call" : `Unknown caller · ${caller}`,
+      contactId ? "Inbound call" : matches.length > 1 ? `Possible contact matches · ${caller}` : `Unknown caller · ${caller}`,
     )
     .first<{ id: number }>();
   if (!communication) throw new Error("Could not create inbound Communication");
@@ -219,6 +244,7 @@ async function createInboundFlow(
   )
     .bind(flowId)
     .first<Flow>();
+  waitUntil(sendCallNotice(env.DB,flowId,callSessionId,caller,matches).catch(() => console.error("Inbound call context notice failed")));
   try {
     const leg = await dialCall({
       to: BRAD_CELL,
@@ -333,6 +359,7 @@ async function analyzeCallTranscript(flow: Flow, transcript: string, transcripti
   if (call?.message_transcript && call.message_transcript.length > transcript.length) return;
   const recordingRole = transcriptionCallControlId === flow.brad_call_control_id ? "brad" : transcriptionCallControlId === flow.contact_call_control_id ? "contact" : null;
   await saveCallAnalysis(env.DB, flow.communication_id, { transcript, contactName: call?.contact_name || "Contact", occurredAt: call?.occurred_at || new Date().toISOString(), recordingRole });
+  waitUntil(indexPending(env.DB,1,false,`communication:${flow.communication_id}`).catch(()=>console.error("Call indexing deferred")));
 }
 
 async function handleLifecycle(event: TelnyxEvent, webhookUrl: string) {
@@ -545,11 +572,12 @@ async function handleLifecycle(event: TelnyxEvent, webhookUrl: string) {
       await env.DB.prepare("UPDATE communications SET recording_id=COALESCE(recording_id,?) WHERE id=?")
         .bind(typeof p.recording_id === "string" ? p.recording_id : null, flow.communication_id).run();
       await analyzeCallTranscript(flow, transcript, typeof p.call_control_id === "string" ? p.call_control_id : null);
+      if (flow.contact_id && transcript.length > 25) await stopContact(Number(flow.contact_id),"Answered call");
     }
   }
 }
 export async function POST(request: Request) {
-  const rawBody = await request.text();
+  const rawBody = new Uint8Array(await request.arrayBuffer());
   if (!(await verifyTelnyxSignature(request, rawBody)))
     return Response.json(
       { ok: false, error: "Invalid signature" },
@@ -557,7 +585,7 @@ export async function POST(request: Request) {
     );
   let event: TelnyxEvent;
   try {
-    event = JSON.parse(rawBody) as TelnyxEvent;
+    event = JSON.parse(new TextDecoder().decode(rawBody)) as TelnyxEvent;
   } catch {
     return Response.json({ ok: false, error: "Invalid JSON" }, { status: 400 });
   }

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { retrieve } from "../lib/claus-ai/retrieval.ts";
+import { retrieve, resolveNamedContact } from "../lib/claus-ai/retrieval.ts";
 import { dateMentions, resolveRelativeDate } from "../lib/claus-ai/dates.mjs";
 
 function fixture() {
@@ -15,7 +15,7 @@ function fixture() {
     CREATE TABLE properties (id INTEGER PRIMARY KEY,contact_id INTEGER,address TEXT,relationship TEXT,status TEXT,created_at TEXT);
     CREATE TABLE relationship_moments (id INTEGER PRIMARY KEY,contact_id INTEGER,type TEXT,date_value TEXT,label TEXT);
     CREATE TABLE contact_relationships (id INTEGER PRIMARY KEY,contact_id INTEGER,related_first_name TEXT,related_last_name TEXT,relationship_type TEXT,source_date TEXT);
-    CREATE TABLE communication_suggestions (id INTEGER PRIMARY KEY,communication_id INTEGER,title TEXT,detail TEXT,due_date TEXT,status TEXT,commitment INTEGER);
+    CREATE TABLE communication_suggestions (id INTEGER PRIMARY KEY,communication_id INTEGER,title TEXT,detail TEXT,due_date TEXT,status TEXT,commitment INTEGER,due_time TEXT,source_excerpt TEXT);
     CREATE TABLE notes (id INTEGER PRIMARY KEY,contact_id INTEGER,body TEXT,created_at TEXT); `);
   sqlite.exec(`INSERT INTO contacts(id,first_name,last_name,relationship,intent,stage,last_meaningful_contact) VALUES
     (1,'Alex','Example','Past Client','Seller','Opportunity','2026-09-01'),
@@ -26,7 +26,7 @@ function fixture() {
     INSERT INTO tasks(id,contact_id,title,type,status,due_date,due_time) VALUES
       (1,2,'Home visit','Appointment','Open','2026-09-25','10:00'),
       (2,1,'Send contractor list','Task','Open','2026-01-10',NULL);
-    INSERT INTO communication_suggestions VALUES(1,1,'Send repair options',NULL,'2026-09-25','Accepted',1);
+    INSERT INTO communication_suggestions (id,communication_id,title,detail,due_date,status,commitment) VALUES(1,1,'Send repair options',NULL,'2026-09-25','Accepted',1);
     INSERT INTO contact_relationships VALUES(1,1,'Sam','Buyer','Referred By','2026-06-15');`);
   return {
     prepare(sql) { return { bind(...values) { return { all() { return { results: sqlite.prepare(sql).all(...values) }; }, first() { return sqlite.prepare(sql).get(...values); } }; } }; },
@@ -58,6 +58,34 @@ test("appointment query uses the current Chicago week", async () => {
     // The seeded appointment is a historical fixture; the query must not invent it as current.
     assert.ok(result.evidence.every(e => e.kind === "appointment"));
   } finally { db.close(); }
+});
+
+test("named final appointment question uses that contact's history", async () => {
+  const db = fixture();
+  try {
+    const result = await retrieve(db, "What was the final agreed appointment time with Casey Example after the earlier proposal changed?");
+    assert.ok(result.tools.includes("get_contact"));
+    assert.ok(result.evidence.some(e => e.contactId === 2));
+    assert.ok(!result.tools.includes("query_appointments"));
+  } finally { db.close(); }
+});
+
+test("explicit contact names scope communication evidence before semantic ranking", async () => {
+  const db = fixture();
+  try {
+    const result = await retrieve(db, "What am I waiting for before Alex is ready to list their house?");
+    assert.equal(result.resolvedContactId, 1);
+    assert.ok(result.tools.includes("search_communications"));
+    assert.ok(result.evidence.length > 0);
+    assert.ok(result.evidence.every(e => e.contactId === 1));
+  } finally { db.close(); }
+});
+
+test("ambiguous first name asks which contact, while a full name resolves", () => {
+  const contacts = [{ id: 1, first_name: "Jordan", last_name: "Example" }, { id: 2, first_name: "Jordan", last_name: "Smith" }];
+  assert.match(resolveNamedContact("What did Jordan say?", contacts).clarification, /Which contact/);
+  assert.equal(resolveNamedContact("What did Jordan Example say?", contacts).id, 1);
+  assert.deepEqual(resolveNamedContact("Who mentioned downsizing?", contacts), {});
 });
 
 test("next Wednesday is resolved from the message's Chicago date without inventing a time", () => {

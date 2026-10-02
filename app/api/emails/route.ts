@@ -3,6 +3,7 @@ import { MAILBOX } from "@/lib/microsoft/graph";
 import { env, waitUntil } from "cloudflare:workers";
 import { analyzeEmailThread } from "@/lib/email-analysis";
 import { createInboundDraft } from "@/lib/claus-ai/auto-draft";
+import { indexPending } from "@/lib/claus-ai/indexer";
 
 type Incoming = { messageId: string; threadId?: string; sender: string; recipients: string[]; timestamp: string; subject?: string; body: string; historical?: boolean; attachments?: { name: string; contentType?: string }[] };
 const normalized = (value: string) => value.trim().toLowerCase();
@@ -26,6 +27,7 @@ export async function POST(request: Request) {
     if (existing) continue;
     const result = await env.DB.prepare("INSERT INTO communications (contact_id,type,direction,occurred_at,subject,message_transcript,author_name,participants,source_system,source_record_id,imported,status) VALUES (?,'Email',?,?,?,?,?,?,?,?,?,'Saved')").bind(contactId,normalized(mail.sender) === MAILBOX ? "outbound" : "inbound",new Date(mail.timestamp).toISOString(),mail.subject || null,mail.body,mail.sender,participants,"email",sourceId,mail.historical ? 1 : 0).run();
     created++;
+    if (!mail.historical && result.meta.last_row_id) waitUntil(indexPending(env.DB,1,false,`communication:${result.meta.last_row_id}`).catch(() => console.error("Email indexing deferred")));
     if (!mail.historical && normalized(mail.sender) !== MAILBOX && result.meta.last_row_id) waitUntil(createInboundDraft(env.DB, Number(result.meta.last_row_id)).catch(error => console.error("Email draft generation failed", { timestamp: new Date().toISOString(), error: error instanceof Error ? error.message : "Unknown" })));
     if (!mail.historical && result.meta.last_row_id) {
       const contact = contacts.results.find(c => Number(c.id) === contactId);
@@ -34,7 +36,7 @@ export async function POST(request: Request) {
       const selected = rows.results.filter(row => { try { return JSON.parse(row.participants || "{}").thread_id === thread; } catch { return false; } });
       const messages = selected.map(row => { const p = JSON.parse(row.participants || "{}"); return { id:Number(row.id), sender:p.sender_name || row.author_name, recipient:p.recipient_name || "", body:row.message_transcript || "", occurredAt:row.occurred_at }; });
       const suggestions = analyzeEmailThread(messages, `${contact?.first_name || "Contact"} ${contact?.last_name || ""}`);
-      for (const row of selected) await env.DB.prepare("DELETE FROM communication_suggestions WHERE communication_id=? AND status='Suggested'").bind(row.id).run();
+      for (const row of selected) await env.DB.prepare("UPDATE communication_suggestions SET status='Superseded' WHERE communication_id=? AND status='Suggested'").bind(row.id).run();
       for (const item of suggestions) await env.DB.prepare("INSERT INTO communication_suggestions (communication_id,category,title,detail,due_date,due_time,daypart,scheduling_precision,field_name,field_value,commitment,source_excerpt,needs_review) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(item.sourceMessageId,item.category,item.title,item.detail || null,item.dueDate || null,item.dueTime || null,item.daypart || null,item.schedulingPrecision || null,item.fieldName || null,item.fieldValue || null,item.commitment ? 1 : 0,item.sourceExcerpt,item.needsReview ? 1 : 0).run();
     }
   }

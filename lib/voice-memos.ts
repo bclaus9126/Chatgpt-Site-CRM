@@ -1,3 +1,4 @@
+import { realEstateProposals } from "./real-estate-extraction";
 import { env } from "cloudflare:workers";
 import { extractVoiceMemoIntelligence } from "./voice-memo-extraction";
 
@@ -20,7 +21,7 @@ export async function transcribeVoiceMemo(audio: Blob, filename = "voice-memo.we
 }
 
 export async function saveVoiceMemoSuggestions(db: D1Database, communicationId: number, transcript: string, baseDate?: string) {
-  for (const item of extractVoiceMemoIntelligence(transcript, baseDate)) {
+  for (const item of [...extractVoiceMemoIntelligence(transcript, baseDate),...realEstateProposals(transcript)]) {
     await db.prepare(`INSERT INTO communication_suggestions
       (communication_id,category,title,detail,due_date,due_time,field_name,field_value,commitment,source_excerpt,needs_review)
       VALUES (?,?,?,?,?,?,?,?,?,?,?)`).bind(communicationId, item.category, item.title, item.detail || null, item.dueDate || null, item.dueTime || null, item.fieldName || null, item.fieldValue || null, item.commitment ? 1 : 0, item.sourceExcerpt, item.needsReview ? 1 : 0).run();

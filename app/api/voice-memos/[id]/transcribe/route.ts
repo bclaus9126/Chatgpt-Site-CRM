@@ -1,5 +1,6 @@
 import { authorizeCrmOwner } from "@/lib/crm-auth";
-import { env } from "cloudflare:workers";
+import { env, waitUntil } from "cloudflare:workers";
+import { indexPending } from "@/lib/claus-ai/indexer";
 import { saveVoiceMemoSuggestions, transcribeVoiceMemo } from "@/lib/voice-memos";
 import { centralDate } from "@/lib/voice-memo-extraction";
 
@@ -23,6 +24,7 @@ export async function POST(_: Request, { params }: { params: Promise<{ id: strin
     ]);
     const recordedAt = new Date(memo.occurred_at.includes("T") ? memo.occurred_at : `${memo.occurred_at.replace(" ", "T")}Z`);
     await saveVoiceMemoSuggestions(env.DB, communicationId, result.transcript, centralDate(recordedAt));
+    waitUntil(indexPending(env.DB,1,false,`communication:${communicationId}`).catch(()=>console.error("Voice memo indexing deferred")));
     return Response.json({ ok: true });
   } catch (error) {
     console.error("Voice memo retry failed", error);

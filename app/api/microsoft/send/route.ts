@@ -2,6 +2,7 @@ import { authorizeCrmOwner } from "@/lib/crm-auth";
 import { env } from "cloudflare:workers";
 import { accessToken, connection, MAILBOX, ORIGIN } from "@/lib/microsoft/graph";
 import { syncMail } from "@/lib/microsoft/sync";
+import { withEmailFooter } from "@/lib/microsoft/email-footer";
 
 const validEmail = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) && value.length <= 254;
 
@@ -25,7 +26,8 @@ export async function POST(request: Request) {
   if (!addresses.includes(to)) return Response.json({ error: "Recipient is not saved on this contact. Edit the contact first." }, { status: 400 });
   try {
     const token = await accessToken(row);
-    const result = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", { method: "POST", headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ message: { subject, body: { contentType: "Text", content: body }, toRecipients: [{ emailAddress: { address: to } }] }, saveToSentItems: true }) });
+    const email=withEmailFooter(body);
+    const result = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", { method: "POST", headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ message: { subject, body: { contentType: "HTML", content: email.html }, toRecipients: [{ emailAddress: { address: to } }] }, saveToSentItems: true }) });
     if (!result.ok) {
       if (result.status === 403) return Response.json({ error: "Microsoft has not granted permission to send mail. Reconnect Microsoft 365 and approve Mail.Send." }, { status: 403 });
       return Response.json({ error: `Microsoft could not accept the email (${result.status}). It was not added to the CRM.` }, { status: 502 });

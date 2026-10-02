@@ -124,3 +124,11 @@ The portable build runs Vinext directly without a host `timeout` command. The ma
 
 - [vinext Documentation](https://github.com/cloudflare/vinext)
 - [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+
+## Campaign runner (deployment prerequisite)
+
+The campaign builder seeds an inactive 14-day Buyer Internet Lead cadence and an inactive Weekly Nurture transition target. No placeholder copy is sent. Production activation requires approved templates and a verified unattended runner heartbeat.
+
+An external scheduler should POST `https://claus-crm.bclaus.chatgpt.site/api/campaigns/run-due` every 5 minutes with `Authorization: Bearer <CAMPAIGN_RUNNER_TOKEN>` and no browser cookies. Store the same token only as the Site's server-side `CAMPAIGN_RUNNER_TOKEN` secret and in the external scheduler's secret store. Do not put it in frontend code, a URL, or logs. A valid call returns HTTP 200 with a concise JSON summary, including `due`, `processed`, `completed`, `failed`, `skipped`, and `automaticSendingEnabled`; invalid authorization returns 401. Settings → Campaign Scheduler shows health and the master switch, which defaults OFF. With it OFF, the runner records a heartbeat and inspects due steps without processing or advancing them. Owner-triggered POST `/api/campaigns/run` still runs Brad-only TEST MODE enrollments, with no production heartbeat. An enrollment/step has a unique execution claim. Interrupted or ambiguous provider requests are held for manual review rather than sent again automatically.
+
+Before connecting a scheduler: verify it can reach the published endpoint without a browser session; confirm a successful heartbeat in Campaigns; add approved SMS/email copy to every step and subtype; configure SMS and email consent on the test contact; verify Telnyx and Microsoft Mail.Send; test a full sequence on Brad's own phone and mailbox. Only then activate production. The runner checks America/Chicago windows, opt-outs, responses, stage changes, and appointments before each send. No browser polling runs production campaigns.

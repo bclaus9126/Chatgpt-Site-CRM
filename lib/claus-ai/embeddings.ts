@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { meteredRequest } from "./budget";
 
 export function embeddingConfig() {
   const values = env as unknown as Record<string, string | undefined>;
@@ -8,13 +9,14 @@ export function embeddingConfig() {
   return { provider, model, key, ready: !!provider && !!model && !!key };
 }
 
-export async function embed(texts: string[]): Promise<number[][]> {
+export async function embed(texts: string[], taskType: "semantic_query" | "semantic_index" = "semantic_query", sourceId?: string): Promise<number[][]> {
   const { provider, model, key, ready } = embeddingConfig();
   if (!ready) throw new Error("EMBEDDINGS_NOT_CONFIGURED");
-  if (!texts.length || texts.length > 25) throw new Error("Invalid embedding batch");
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 25000);
-  try {
+  if (!texts.length || texts.length > 8) throw new Error("Invalid embedding batch");
+  return meteredRequest({ provider, model, tier: "embedding", taskType, prompt: texts.join("\n"), sourceId }, async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 25000);
+    try {
     let url: string, body: unknown, headers: Record<string, string> = { "Content-Type": "application/json" };
     if (provider === "openai" || provider === "mistral") {
       url = provider === "openai" ? "https://api.openai.com/v1/embeddings" : "https://api.mistral.ai/v1/embeddings";
@@ -30,8 +32,11 @@ export async function embed(texts: string[]): Promise<number[][]> {
     const data = await response.json() as Record<string, any>;
     const vectors: number[][] = provider === "google" ? (data.embeddings || []).map((r: any) => r.values) : (data.data || []).sort((a: any, b: any) => a.index - b.index).map((r: any) => r.embedding);
     if (vectors.length !== texts.length || vectors.some(v => !Array.isArray(v) || !v.length || v.some(x => !Number.isFinite(x)))) throw new Error("Invalid embedding response");
-    return vectors;
-  } finally { clearTimeout(timeout); }
+    const usage = data.usage || data.usageMetadata || {};
+    const actualUsd = Number(usage.cost_usd ?? usage.cost ?? NaN);
+    return { value: vectors, usage: { input: Number(usage.prompt_tokens ?? usage.total_tokens ?? usage.promptTokenCount ?? 0), output: 0, cached: Number(usage.cached_tokens ?? usage.cachedContentTokenCount ?? 0), actualUsd: Number.isFinite(actualUsd) ? actualUsd : null } };
+    } finally { clearTimeout(timeout); }
+  });
 }
 
 export function cosine(a: number[], b: number[]) {

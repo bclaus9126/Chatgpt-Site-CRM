@@ -23,5 +23,5 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!api/telnyx/voice|signin-with-chatgpt|signout-with-chatgpt|callback|_next|favicon.svg).*)"],
+  matcher: ["/((?!api/telnyx/voice|api/telnyx/sms|api/campaigns/unsubscribe|api/campaigns/run-due|api/telnyx/media/|u/|IABS-JLA.pdf|signin-with-chatgpt|signout-with-chatgpt|callback|_next|favicon.svg|sw.js|manifest.webmanifest).*)"],
 };

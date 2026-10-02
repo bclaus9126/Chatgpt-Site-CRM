@@ -1,3 +1,4 @@
+import { realEstateProposals } from "./real-estate-extraction";
 import { centralDate, resolveMemoDate } from "./voice-memo-extraction";
 import type { CallSuggestion } from "./call-analysis";
 import { addressSuggestion } from "./address-intelligence";
@@ -16,6 +17,7 @@ export function analyzeSmsConversation(messages: SmsMessage[], contactName: stri
   const recent = (m: SmsMessage) => !historical || (current && Date.parse(current.occurredAt) - Date.parse(m.occurredAt) < 7 * 86400000);
   let appointment: { proposal: SmsMessage; date: ReturnType<typeof resolveMemoDate>; time: string | undefined; confirmation?: SmsMessage } | null = null;
   for (const message of ordered) {
+    for(const p of realEstateProposals(message.body))addFact(p.fieldName,{...p,sourceMessageId:message.id});
     const text = message.body.trim(), lower = text.toLowerCase(), fromBrad = message.sender.toLowerCase() === "brad claus";
     const expandedDateText = text.replace(/\b(Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\b/gi, (month) => ({ jan:"January",feb:"February",mar:"March",apr:"April",jun:"June",jul:"July",aug:"August",sep:"September",sept:"September",oct:"October",nov:"November",dec:"December" })[month.toLowerCase()] || month);
     const date = resolveMemoDate(expandedDateText, centralDate(new Date(message.occurredAt)));

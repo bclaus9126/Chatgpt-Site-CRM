@@ -16,7 +16,6 @@ async function fileFrom(req: Request) {
   const form = await req.formData();
   const file = form.get("file");
   if (!(file instanceof File)) throw new Error("Choose a Follow Up Boss CSV file.");
-  if (file.size > 15_000_000) throw new Error("The CSV must be smaller than 15 MB for this importer.");
   const parsed = parseCsv(await file.text());
   if (!isFollowUpBoss(parsed.headers)) throw new Error("This does not look like a Follow Up Boss contact export.");
   return { ...parsed, file, form };
@@ -122,6 +121,27 @@ async function insertStructured(db: D1Database, row: FubRow, contactId: number, 
   if (row["Deal Stage"] || row["Deal Close Date"] || row["Deal Price"]) await db.prepare("INSERT INTO opportunities (contact_id,type,stage,estimated_price,expected_timeframe,property_address,notes,import_job_id,source_system,source_record_id) VALUES (?,?,?,?,?,?,?,?,?,?)").bind(contactId, /seller/i.test(row.Stage || "") ? "Seller" : "Transaction", row["Deal Stage"] || "Historical", Number((row["Deal Price"] || "").replace(/[^0-9.]/g, "")) || null, row["Deal Close Date"] || null, propertyAddress || null, "Imported from Follow Up Boss", jobId, SOURCE, row.ID || null).run();
 }
 
+
+async function importRecords(db: D1Database, records: FubRow[], jobId: number, offset: number) {
+    let imported = 0, skipped = 0, errors = 0;
+    for (let i = 0; i < records.length; i++) {
+      const row = records[i], existing = await db.prepare("SELECT status FROM import_rows WHERE import_job_id=? AND row_number=?").bind(jobId,offset+i+2).first();
+      if (existing) continue;
+      const match = await matchRow(db, row), names = contactName(row);
+      if (!names.first && !names.last) { errors++; await db.prepare("INSERT INTO import_rows (import_job_id,row_number,external_fub_id,status,error,raw_json) VALUES (?,?,?,'Error',?,?)").bind(jobId, offset + i + 2, row.ID || null, "Missing contact name", JSON.stringify(row)).run(); continue; }
+      if (match.type !== "No match") { skipped++; await db.prepare("INSERT INTO import_rows (import_job_id,row_number,external_fub_id,contact_id,status,match_type,warning,raw_json) VALUES (?,?,?,?, 'Skipped',?,?,?)").bind(jobId, offset + i + 2, row.ID || null, match.id, match.type, `${match.reason}; skipped by review decision`, JSON.stringify(row)).run(); continue; }
+      const phone = normalizePhone(row["Phone 1"]), email = normalizeEmail(row["Email 1"]);
+      const classification = fromFubStage(row.Stage || "");
+      const primaryAddress = row["Address 1"] || formatContactAddress({addressStreet:row["Address 1 - Street"],addressCity:row["Address 1 - City"],addressState:row["Address 1 - State"],addressZip:row["Address 1 - Zip"] || row["Address 1 - Postal Code"]});
+      const result = await db.prepare("INSERT INTO contacts (first_name,last_name,phone,email,address,relationship,lead_source,intent,temperature,tags,external_fub_id,source_system,import_job_id,birthday,date_added,stage,timeframe,created_at,updated_at,email_consent) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE(?,CURRENT_TIMESTAMP),CURRENT_TIMESTAMP,1)").bind(names.first || "Unknown", names.last || "", phone || row["Phone 1"] || null, email || null, primaryAddress || null, classification.relationship, row["Lead Source"] || null, "None / Unknown", "Warm", row.Tags || null, row.ID || null, SOURCE, jobId, row.Birthday || null, row["Date Added"] || null, classification.stage, row.Timeframe || null, row["Date Added"] || null).run();
+      const contactId = Number(result.meta.last_row_id);
+      await insertMethods(db, row, contactId, jobId); await insertHistory(db, row, contactId, jobId); await insertStructured(db, row, contactId, jobId);
+      await db.prepare("INSERT INTO import_rows (import_job_id,row_number,external_fub_id,contact_id,status,raw_json) VALUES (?,?,?,?, 'Imported',?)").bind(jobId, offset + i + 2, row.ID || null, contactId, JSON.stringify(row)).run();
+      imported++;
+    }
+    return { imported, skipped, errors };
+}
+
 export async function GET(req?: Request) {
   const auth = await authorizeCrmOwner(); if (auth.denied) return auth.denied;
   const jobId = req ? new URL(req.url).searchParams.get("jobId") : null;
@@ -137,6 +157,30 @@ export async function POST(req: Request) {
   const auth = await authorizeCrmOwner(); if (auth.denied) return auth.denied;
   try {
     const mode = new URL(req.url).searchParams.get("mode") || "analyze";
+    if (mode === "start") {
+      const { fileName, total, warningCount, duplicateCount } = await req.json() as { fileName:string; total:number; warningCount:number; duplicateCount:number };
+      if (!fileName || !Number.isSafeInteger(total) || total < 1 || !Number.isSafeInteger(warningCount) || warningCount < 0 || !Number.isSafeInteger(duplicateCount) || duplicateCount < 0) throw new Error("Invalid import details.");
+      const result = await env.DB.prepare("INSERT INTO import_jobs (file_name,source_system,total_rows,status,warning_count,error_count,duplicate_records) VALUES (?,?,?,'Processing',?,0,?)").bind(fileName,SOURCE,total,warningCount,duplicateCount).run();
+      return NextResponse.json({ jobId: Number(result.meta.last_row_id) });
+    }
+    if (mode === "chunk") {
+      const { jobId, offset, records } = await req.json() as { jobId:number; offset:number; records:FubRow[] };
+      if (!Number.isSafeInteger(jobId) || !Number.isSafeInteger(offset) || offset < 0 || !Array.isArray(records) || !records.length || records.length > 10 || records.some(row => !row || typeof row !== "object" || Array.isArray(row) || Object.values(row).some(value => typeof value !== "string"))) throw new Error("Invalid import batch.");
+      const job = await env.DB.prepare("SELECT total_rows,status FROM import_jobs WHERE id=? AND source_system=?").bind(jobId,SOURCE).first<{total_rows:number;status:string}>();
+      if (!job || job.status !== "Processing" || offset + records.length > job.total_rows) throw new Error("Import batch does not match the active job.");
+      const counts = await importRecords(env.DB, records, jobId, offset);
+      await env.DB.prepare("UPDATE import_jobs SET imported_records=(SELECT count(*) FROM import_rows WHERE import_job_id=? AND status='Imported'),skipped_records=(SELECT count(*) FROM import_rows WHERE import_job_id=? AND status='Skipped'),error_count=(SELECT count(*) FROM import_rows WHERE import_job_id=? AND status='Error') WHERE id=?").bind(jobId,jobId,jobId,jobId).run();
+      return NextResponse.json(counts);
+    }
+    if (mode === "finish") {
+      const { jobId } = await req.json() as {jobId:number};
+      const job = await env.DB.prepare("SELECT total_rows,status,error_count FROM import_jobs WHERE id=? AND source_system=?").bind(jobId,SOURCE).first<{total_rows:number;status:string;error_count:number}>();
+      if (!job || job.status !== "Processing") throw new Error("Import job is not active.");
+      const result = await env.DB.prepare("SELECT count(*) AS total FROM import_rows WHERE import_job_id=?").bind(jobId).first<{total:number}>();
+      if (result?.total !== job.total_rows) throw new Error("The import is incomplete. Resume the missing batch before finishing.");
+      await env.DB.prepare("UPDATE import_jobs SET status=?,completed_at=CURRENT_TIMESTAMP WHERE id=?").bind(job.error_count ? "Completed with issues" : "Completed",jobId).run();
+      return NextResponse.json({jobId});
+    }
     if (mode === "rollback") {
       const { jobId } = await req.json() as { jobId: number };
       const job = await env.DB.prepare("SELECT status FROM import_jobs WHERE id=?").bind(jobId).first<{ status: string }>();
@@ -161,32 +205,12 @@ export async function POST(req: Request) {
     const analysis = await analyze(env.DB, headers, records);
     if (mode === "analyze") return NextResponse.json({ analysis, detected: true, format: "Follow Up Boss", columns: headers.length });
     if (mode !== "import") throw new Error("Unknown import action.");
-    if (records.length > 100) throw new Error("This importer accepts up to 100 contacts per file. Split larger exports into smaller files.");
     if (analysis.errors.length) throw new Error("Resolve malformed rows before importing.");
     const decisions = JSON.parse(String(form.get("decisions") || "{}")) as Record<string, "skip" | "merge" | "create">;
     if (Object.values(decisions).some((decision) => decision !== "skip")) throw new Error("Merging and creating duplicate contacts are disabled until their rollback and repeat-import behavior is verified.");
     const jobResult = await env.DB.prepare("INSERT INTO import_jobs (file_name,source_system,total_rows,status,warning_count,error_count,duplicate_records) VALUES (?,?,?,'Processing',?,?,?)").bind(file.name, SOURCE, records.length, analysis.unknownColumns.length, analysis.malformed, analysis.duplicates.length).run();
     const jobId = Number(jobResult.meta.last_row_id);
-    let imported = 0, skipped = 0, errors = 0;
-    for (let i = 0; i < records.length; i++) {
-      const row = records[i], match = await matchRow(env.DB, row), names = contactName(row);
-      if (!names.first && !names.last) { errors++; await env.DB.prepare("INSERT INTO import_rows (import_job_id,row_number,external_fub_id,status,error,raw_json) VALUES (?,?,?,'Error',?,?)").bind(jobId, i + 2, row.ID || null, "Missing contact name", JSON.stringify(row)).run(); continue; }
-      const decision = decisions[String(i + 2)] || "skip";
-      if (match.type !== "No match" && decision === "skip") { skipped++; await env.DB.prepare("INSERT INTO import_rows (import_job_id,row_number,external_fub_id,contact_id,status,match_type,warning,raw_json) VALUES (?,?,?,?, 'Skipped',?,?,?)").bind(jobId, i + 2, row.ID || null, match.id, match.type, `${match.reason}; skipped by review decision`, JSON.stringify(row)).run(); continue; }
-      if (match.type !== "No match" && decision === "merge" && match.id) {
-        await insertMethods(env.DB, row, match.id, jobId); await insertHistory(env.DB, row, match.id, jobId); await insertStructured(env.DB, row, match.id, jobId);
-        await env.DB.prepare("INSERT INTO import_rows (import_job_id,row_number,external_fub_id,contact_id,status,match_type,warning,raw_json) VALUES (?,?,?,?, 'Merged',?,?,?)").bind(jobId, i + 2, row.ID || null, match.id, match.type, "Existing contact values preserved; incoming facts added with provenance", JSON.stringify(row)).run();
-        imported++; continue;
-      }
-      const phone = normalizePhone(row["Phone 1"]), email = normalizeEmail(row["Email 1"]);
-      const classification = fromFubStage(row.Stage || "");
-      const primaryAddress = row["Address 1"] || formatContactAddress({addressStreet:row["Address 1 - Street"],addressCity:row["Address 1 - City"],addressState:row["Address 1 - State"],addressZip:row["Address 1 - Zip"] || row["Address 1 - Postal Code"]});
-      const result = await env.DB.prepare("INSERT INTO contacts (first_name,last_name,phone,email,address,relationship,lead_source,intent,temperature,tags,external_fub_id,source_system,import_job_id,birthday,date_added,stage,timeframe,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE(?,CURRENT_TIMESTAMP),CURRENT_TIMESTAMP)").bind(names.first || "Unknown", names.last || "", phone || row["Phone 1"] || null, email || null, primaryAddress || null, classification.relationship, row["Lead Source"] || null, "None / Unknown", "Warm", row.Tags || null, row.ID || null, SOURCE, jobId, row.Birthday || null, row["Date Added"] || null, classification.stage, row.Timeframe || null, row["Date Added"] || null).run();
-      const contactId = Number(result.meta.last_row_id);
-      await insertMethods(env.DB, row, contactId, jobId); await insertHistory(env.DB, row, contactId, jobId); await insertStructured(env.DB, row, contactId, jobId);
-      await env.DB.prepare("INSERT INTO import_rows (import_job_id,row_number,external_fub_id,contact_id,status,raw_json) VALUES (?,?,?,?, 'Imported',?)").bind(jobId, i + 2, row.ID || null, contactId, JSON.stringify(row)).run();
-      imported++;
-    }
+    const { imported, skipped, errors } = await importRecords(env.DB, records, jobId, 0);
     await env.DB.prepare("UPDATE import_jobs SET imported_records=?,skipped_records=?,error_count=?,status=?,completed_at=CURRENT_TIMESTAMP WHERE id=?").bind(imported, skipped, errors, errors ? "Completed with issues" : "Completed", jobId).run();
     return NextResponse.json({ jobId, imported, skipped, errors, analysis });
   } catch (error) {

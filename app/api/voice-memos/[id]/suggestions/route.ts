@@ -1,3 +1,4 @@
+import { applyReviewedRealEstate } from "@/lib/real-estate-review";
 import { authorizeCrmOwner } from "@/lib/crm-auth";
 import { env } from "cloudflare:workers";
 import { syncAppointment } from "@/lib/microsoft/calendar";
@@ -5,7 +6,7 @@ import { syncAppointment } from "@/lib/microsoft/calendar";
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await authorizeCrmOwner(); if (auth.denied) return auth.denied;
   const communicationId = Number((await params).id);
-  const body = await request.json() as { ids?: number[]; dismiss?: boolean };
+  const body = await request.json() as { ids?: number[]; dismiss?: boolean; transactionId?:number };
   const memo = await env.DB.prepare("SELECT id,contact_id,message_transcript,type,occurred_at,participants FROM communications WHERE id=? AND type IN ('Voice Memo','Call','SMS','Text','Email')").bind(communicationId).first<{ id: number; contact_id: number; message_transcript: string; type: string; occurred_at: string; participants: string }>();
   if (!memo) return Response.json({ error: "Communication not found" }, { status: 404 });
   if (!memo.contact_id) return Response.json({ error: "This call is not linked to a contact." }, { status: 409 });
@@ -19,7 +20,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   for (const suggestionId of ids) {
     const suggestion = await env.DB.prepare("SELECT * FROM communication_suggestions WHERE id=? AND communication_id=? AND status='Suggested'").bind(suggestionId, communicationId).first<Record<string, any>>();
     if (!suggestion) continue;
-    if (suggestion.category === "ADDRESS REVIEW") continue;
+    if (suggestion.category === "ADDRESS REVIEW" && (suggestion.needs_review || !suggestion.field_value)) continue;
     if (suggestion.category === "NOTE") {
       await env.DB.prepare("INSERT INTO notes (contact_id,body,source_system,source_record_id,created_at) VALUES (?,?,?,?,CURRENT_TIMESTAMP)").bind(memo.contact_id, suggestion.detail || suggestion.title, sourceSystem, String(communicationId)).run();
     } else if (suggestion.category === "RELATIONSHIP MOMENT") {
@@ -37,6 +38,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
         await env.DB.prepare("UPDATE contacts SET address=?,updated_at=CURRENT_TIMESTAMP,update_source='reviewed_ai',updated_by='Brad Claus' WHERE id=?").bind(suggestion.field_value || null,memo.contact_id).run();
       }
       const sourceDate = (sourceSystem === "sms" || sourceSystem === "email" || sourceSystem === "call") ? memo.occurred_at : new Date().toISOString();
+      try { await applyReviewedRealEstate(suggestion,memo.contact_id,sourceSystem,communicationId,sourceDate,body.transactionId); }
+      catch (error) { return Response.json({error:error instanceof Error ? error.message : "Unable to apply this recommendation"},{status:409}); }
       const latest = await env.DB.prepare("SELECT source_date FROM contact_intelligence WHERE contact_id=? AND field_name=? AND status='Current' ORDER BY source_date DESC LIMIT 1").bind(memo.contact_id, fieldName).first<{source_date:string}>();
       const status = latest?.source_date && latest.source_date > sourceDate ? "Previous" : "Current";
       if (status === "Current") await env.DB.prepare("UPDATE contact_intelligence SET status='Previous' WHERE contact_id=? AND field_name=? AND status='Current' AND COALESCE(source_date,'')<=?").bind(memo.contact_id,fieldName,sourceDate).run();

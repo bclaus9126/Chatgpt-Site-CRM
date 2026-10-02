@@ -1,8 +1,10 @@
 import { authorizeCrmOwner } from "@/lib/crm-auth";
-import { env } from "cloudflare:workers";
+import { env, waitUntil } from "cloudflare:workers";
+import { indexPending } from "@/lib/claus-ai/indexer";
 import { relationshipOptions, intentOptions, stageOptions, fromFubStage } from "@/lib/contact-classification";
 import { NextResponse } from "next/server";
 import { syncAppointment } from "@/lib/microsoft/calendar";
+import { stopContact } from "@/lib/campaign";
 import { formatContactAddress } from "@/lib/contact-address";
 async function load(db: D1Database) {
   const [
@@ -85,6 +87,41 @@ export async function POST(req: Request) {
     };
     const validEmail = (value: unknown) => !value || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value));
     const validPhone = (value: unknown) => !value || /^[+()\d.\s-]{7,24}$/.test(String(value));
+    if (b.action === "deleteContact") {
+      if (!Number.isInteger(b.id) || b.id <= 0) return NextResponse.json({error:"Invalid contact"},{status:400});
+      const contact = await db.prepare("SELECT id FROM contacts WHERE id=?").bind(b.id).first();
+      if (!contact) return NextResponse.json({error:"Contact not found"},{status:404});
+      const recordings = await db.prepare("SELECT audio_object_key FROM communications WHERE contact_id=? AND audio_object_key IS NOT NULL").bind(b.id).all<{audio_object_key:string}>();
+      const documents = await db.prepare("SELECT object_key FROM transaction_files WHERE transaction_id IN(SELECT id FROM transactions WHERE contact_id=?)").bind(b.id).all<{object_key:string}>();
+      // D1 batch runs atomically. Remove dependent records before the contact so
+      // the database's foreign keys remain enforced throughout the operation.
+      const id = b.id;
+      await db.batch([
+        db.prepare("DELETE FROM claus_ai_drafts WHERE contact_id=? OR communication_id IN (SELECT id FROM communications WHERE contact_id=?)").bind(id,id),
+        db.prepare("DELETE FROM communication_suggestions WHERE communication_id IN (SELECT id FROM communications WHERE contact_id=?)").bind(id),
+        db.prepare("DELETE FROM telnyx_call_flows WHERE contact_id=? OR communication_id IN (SELECT id FROM communications WHERE contact_id=?)").bind(id,id),
+        db.prepare("DELETE FROM claus_ai_embeddings WHERE contact_id=?").bind(id),
+        db.prepare("DELETE FROM claus_ai_index_queue WHERE (source_kind='contact' AND source_id=?) OR (source_kind='communication' AND source_id IN (SELECT id FROM communications WHERE contact_id=?)) OR (source_kind='note' AND source_id IN (SELECT id FROM notes WHERE contact_id=?))").bind(id,id,id),
+        db.prepare("DELETE FROM campaign_executions WHERE enrollment_id IN (SELECT id FROM campaign_enrollments WHERE contact_id=?)").bind(id),
+        db.prepare("DELETE FROM campaign_enrollments WHERE contact_id=?").bind(id),
+        db.prepare("DELETE FROM import_rows WHERE contact_id=?").bind(id),
+        db.prepare("DELETE FROM contact_relationships WHERE contact_id=? OR related_contact_id=?").bind(id,id),
+        db.prepare("UPDATE properties SET contact_id=(SELECT t.contact_id FROM transactions t WHERE t.property_id=properties.id AND t.contact_id<>? LIMIT 1) WHERE contact_id=? AND EXISTS(SELECT 1 FROM transactions t WHERE t.property_id=properties.id AND t.contact_id<>?)").bind(id,id,id),
+        db.prepare("DELETE FROM transaction_files WHERE transaction_id IN(SELECT id FROM transactions WHERE contact_id=?)").bind(id),
+        db.prepare("DELETE FROM transaction_links WHERE transaction_id IN(SELECT id FROM transactions WHERE contact_id=?)").bind(id),
+        db.prepare("DELETE FROM real_estate_history WHERE contact_id=? OR transaction_id IN(SELECT id FROM transactions WHERE contact_id=?)").bind(id,id),
+        db.prepare("DELETE FROM transaction_contacts WHERE contact_id=? OR transaction_id IN(SELECT id FROM transactions WHERE contact_id=?)").bind(id,id),
+        db.prepare("DELETE FROM transactions WHERE contact_id=?").bind(id),
+        db.prepare("DELETE FROM buyer_profiles WHERE contact_id=?").bind(id),
+        ...["contact_methods","contact_intelligence","relationship_moments","activities","properties","notes","tasks","opportunities","communications"].map(table => db.prepare(`DELETE FROM ${table} WHERE contact_id=?`).bind(id)),
+        db.prepare("DELETE FROM contacts WHERE id=?").bind(id),
+      ]);
+      await Promise.all([...recordings.results.map(r=>r.audio_object_key),...documents.results.map(r=>r.object_key)].map(async (audio_object_key) => {
+        try { await env.FILES.delete(audio_object_key); }
+        catch (error) { console.error("Contact recording cleanup failed", error); }
+      }));
+      return NextResponse.json(await load(db));
+    }
     if (b.action === "editContact") {
       if (!Number.isInteger(b.id) || !String(b.first_name || "").trim() || !String(b.last_name || "").trim() || !validEmail(b.email) || !validPhone(b.phone)) return NextResponse.json({error:"Check name, phone and email."},{status:400});
       const extras = (raw: unknown, validator: (v: unknown) => boolean) => String(raw || "").split("\n").map(v => v.trim()).filter(Boolean).every(v => validator(v.split("|")[0].trim()));
@@ -97,7 +134,9 @@ export async function POST(req: Request) {
         // An untouched legacy address remains byte-for-byte intact.
         changes.address = b.originalAddress === existing?.address && b.addressEdited !== true ? existing?.address : formatted || null;
       }
+      const previous = await db.prepare("SELECT stage FROM contacts WHERE id=?").bind(b.id).first<{stage:string|null}>();
       await save("contacts", b.id, changes);
+      if (changes.stage !== previous?.stage) await stopContact(Number(b.id),"Stage changed");
     }
     if (b.action === "saveAppointment" || b.action === "saveTask") {
       if (!Number.isInteger(b.contactId) || !String(b.title || "").trim()) return NextResponse.json({error:"Choose a contact and title."},{status:400});
@@ -108,6 +147,7 @@ export async function POST(req: Request) {
       if (appointment && b.inviteContact) { const contact=await db.prepare("SELECT email FROM contacts WHERE id=?").bind(b.contactId).first<{email:string|null}>(); if(!contact?.email) return NextResponse.json({error:"Add the contact's email before inviting them."},{status:400}); }
       if (b.id) await save("tasks", Number(b.id), {title:b.title,type:appointment?"Appointment":b.type||"Task",due_date:b.dueDate||null,due_time:b.precision === "exact" ? b.dueTime||null : null,status:b.status||"Open",notes:b.notes||null,details});
       else { const created=await db.prepare("INSERT INTO tasks (contact_id,title,type,due_date,due_time,status,notes,details,source_system,update_source,updated_by,created_at) VALUES (?,?,?,?,?,?,?,?, 'manual','manual','Brad Claus',CURRENT_TIMESTAMP)").bind(b.contactId,b.title,appointment?"Appointment":b.type||"Task",b.dueDate||null,b.precision === "exact"?b.dueTime||null:null,b.status||"Open",b.notes||null,details).run(); b.id=created.meta.last_row_id; }
+      if (appointment) await stopContact(Number(b.contactId),"Appointment created");
       if (appointment) await syncAppointment(Number(b.id));
     }
     if (b.action === "saveTransaction") {
@@ -122,6 +162,7 @@ export async function POST(req: Request) {
       const options: Record<string, readonly string[]> = { relationship: relationshipOptions, intent: intentOptions, stage: stageOptions };
       if (!options[b.field]?.includes(b.value) || !Number.isInteger(b.contactId)) return NextResponse.json({ error: "Invalid contact classification" }, { status: 400 });
       await db.prepare(`UPDATE contacts SET ${b.field}=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(b.value, b.contactId).run();
+      if (b.field === "stage") await stopContact(Number(b.contactId),"Stage changed");
     }
     if (b.action === "normalizeFubClassifications") {
       const imported = await db.prepare("SELECT r.contact_id,r.raw_json,c.relationship,c.intent,c.stage FROM import_rows r JOIN contacts c ON c.id=r.contact_id WHERE r.status='Imported' AND c.source_system='follow_up_boss'").all<Record<string,any>>();
@@ -170,6 +211,18 @@ export async function POST(req: Request) {
         )
         .bind(b.contactId)
         .run();
+      if (r.meta.last_row_id) waitUntil(indexPending(db,1,false,`note:${r.meta.last_row_id}`).catch(()=>console.error("Note indexing deferred")));
+    }
+    if (b.action === "editNote") {
+      const id = Number(b.id), contactId = Number(b.contactId), body = String(b.body || "").trim();
+      if (!Number.isSafeInteger(id) || id <= 0 || !Number.isSafeInteger(contactId) || contactId <= 0 || !body || body.length > 20000)
+        return NextResponse.json({error:"Enter a note under 20,000 characters."},{status:400});
+      const result = await db.prepare("UPDATE notes SET body=? WHERE id=? AND contact_id=?")
+        .bind(body,id,contactId).run();
+      if (!result.meta.changes) return NextResponse.json({error:"Note not found on this contact."},{status:404});
+      await db.prepare("UPDATE activities SET detail=? WHERE type='note' AND source_id=? AND contact_id=?")
+        .bind(body,id,contactId).run();
+      waitUntil(indexPending(db,1,false,`note:${id}`).catch(()=>console.error("Note indexing deferred")));
     }
     if (b.action === "addTask")
       await db
@@ -201,10 +254,10 @@ export async function POST(req: Request) {
         .bind(tags || null, b.contactId)
         .run();
     }
-    if (b.action === "addContact")
-      await db
+    if (b.action === "addContact") {
+      const created = await db
         .prepare(
-          "INSERT INTO contacts (first_name,last_name,phone,email,address,relationship,lead_source,intent,stage,temperature,next_follow_up,recommended_next_action,tags) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          "INSERT INTO contacts (first_name,last_name,phone,email,address,relationship,lead_source,intent,stage,temperature,next_follow_up,recommended_next_action,tags,email_consent) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
         )
         .bind(
           b.firstName,
@@ -222,6 +275,8 @@ export async function POST(req: Request) {
           b.tags || null,
         )
         .run();
+      return NextResponse.json({ ...(await load(db)), createdContactId: Number(created.meta.last_row_id) });
+    }
     return NextResponse.json(await load(db));
   } catch (e) {
     console.error(e);

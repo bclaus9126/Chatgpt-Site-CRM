@@ -1,7 +1,8 @@
+import { realEstateRetrieval } from "./real-estate-retrieval";
 type Row = Record<string, any>;
 import { dateMentions } from "./dates.mjs";
-export type Evidence = { kind: string; id: number; contactId?: number; contact?: string; date?: string; excerpt: string; };
-export type Retrieval = { records: Row[]; evidence: Evidence[]; tools: string[]; contactIds: number[]; totalMatches: number; draftSource?: Row };
+export type Evidence = { kind: string; id: number; contactId?: number; contact?: string; date?: string; excerpt: string; sourceType?: string; sender?: string; recipient?: string; threadId?: string; chunkIndex?: number; sourceUrl?: string; };
+export type Retrieval = { records: Row[]; evidence: Evidence[]; tools: string[]; contactIds: number[]; totalMatches: number; resolvedContactId?: number; clarification?: string; draftSource?: Row; transactionIds?:number[]; sourceKinds?:string[]; thresholdNote?:string };
 const TZ = "America/Chicago";
 const compact = (text: unknown, max = 420) => String(text || "").replace(/\s+/g, " ").trim().slice(0, max);
 const rows = async (db: D1Database, query: string, bindings: unknown[] = []) =>
@@ -11,6 +12,16 @@ const dateAgo = (days: number) => { const date = new Date(`${today()}T12:00:00Z`
 const thisWeek = () => { const date = new Date(`${today()}T12:00:00Z`); const day = date.getUTCDay(); date.setUTCDate(date.getUTCDate() - ((day + 6) % 7)); const start = date.toISOString().slice(0, 10); date.setUTCDate(date.getUTCDate() + 7); return [start, date.toISOString().slice(0, 10)]; };
 const contactFields = "id,first_name,last_name,relationship,intent,stage,lead_source,temperature,tags,birthday,spouse_name,address,price_range,target_locations,financing_type,desired_property,desired_move_date,property_address,selling_timeline,selling_reason,motivation,concerns,relationship_summary,contextual_notes,last_meaningful_contact,next_follow_up,recommended_next_action";
 const nameOf = (row: Row) => [row.first_name, row.last_name].filter(Boolean).join(" ");
+const namePattern = (name: string) => new RegExp(`(?:^|[^\\p{L}\\p{N}])${name.trim().split(/\s+/).map(part => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+")}(?=$|[^\\p{L}\\p{N}])`, "iu");
+export function resolveNamedContact(question: string, contacts: Row[]): { id?: number; clarification?: string } {
+  // Full names take precedence over first names; a shared first name needs clarification.
+  const full = contacts.filter(c => c.first_name && c.last_name && namePattern(nameOf(c)).test(question));
+  const longest = Math.max(0, ...full.map(c => nameOf(c).length));
+  const matches = longest ? full.filter(c => nameOf(c).length === longest) : contacts.filter(c =>
+    String(c.first_name || "").trim().length >= 4 && namePattern(String(c.first_name)).test(question));
+  if (matches.length > 1) return { clarification: `Which contact do you mean: ${matches.slice(0, 5).map(nameOf).join(", ")}${matches.length > 5 ? ", or another match" : ""}?` };
+  return matches.length ? { id: Number(matches[0].id) } : {};
+}
 const topicTerms = (q: string) => {
   const stop = new Set(["what","which","about","from","this","that","said","have","does","their","there","derek","melissa","past","clients","client","contact","contacts","talking","talked","mentioned","mention","discussed","discuss","email","emailed","text","texts","message","messages","sent","selling","seller","buyers","buyer","months","month","last","when","where","with","they","them","those","into","over"]);
   const terms = q.match(/[a-z]{4,}/g)?.filter(x => !stop.has(x)).slice(0, 4) || [];
@@ -26,8 +37,11 @@ export async function retrieve(db: D1Database, question: string, previousIds: nu
   const records: Row[] = [];
   let totalMatches = 0;
   const allNames = await rows(db, "SELECT id,first_name,last_name FROM contacts ORDER BY length(first_name)+length(last_name) DESC LIMIT 500");
-  const named = allNames.find(c => q.includes(nameOf(c).toLowerCase()) || (c.first_name?.length >= 4 && new RegExp(`\\b${String(c.first_name).toLowerCase().replace(/[^a-z]/g, "")}\\b`).test(q)));
-  const ids = scopedId ? [scopedId] : named ? [Number(named.id)] : /\b(those|them|these|he|she|that contact)\b/.test(q) ? previousIds.slice(0, 30) : [];
+  const named = scopedId ? { id: scopedId } : resolveNamedContact(question, allNames);
+  if (named.clarification) return { records: [], evidence: [], tools: [], contactIds: [], totalMatches: 0, clarification: named.clarification };
+  const ids = named.id ? [named.id] : /\b(those|them|these|he|she|that contact)\b/.test(q) ? previousIds.slice(0, 30) : [];
+  const estate=await realEstateRetrieval(db,question,ids);
+  if(estate) return estate;
   const contactIds: number[] = [];
   const push = (items: Row[], kind: string, describe: (r: Row) => string, date?: (r: Row) => string) => {
     for (const r of items) {
@@ -43,7 +57,7 @@ export async function retrieve(db: D1Database, question: string, previousIds: nu
     tools.push("query_contacts", "search_communications");
     const month = `${today().slice(0, 7)}-01`;
     push(await rows(db, `SELECT ${contactFields} FROM contacts WHERE id IN (${ids.map(() => "?").join(",")}) AND EXISTS (SELECT 1 FROM communications m WHERE m.contact_id=contacts.id AND m.occurred_at>=?) ORDER BY last_name LIMIT 30`, [...ids, month]), "contact", r => `${nameOf(r)} · ${r.relationship} · ${r.intent} · last contact ${r.last_meaningful_contact || "not recorded"}`);
-  } else if (ids.length && (summary || timeline || isDraft || /\bwhat (?:did|has)|\bwhen did|\bthey\b/.test(q))) {
+  } else if (ids.length && (summary || timeline || isDraft || /\bwhat (?:did|has|was)|\bwhen did|\bthey\b|\b(?:final|agreed|changed|proposed)\b/.test(q))) {
     tools.push("get_contact");
     const cs = await rows(db, `SELECT ${contactFields} FROM contacts WHERE id IN (${ids.map(() => "?").join(",")}) LIMIT 10`, ids.slice(0, 10));
     push(cs, "contact", c => [nameOf(c), c.relationship, c.intent, c.stage, c.price_range, c.target_locations, c.selling_timeline, c.motivation].filter(Boolean).join(" · "));
@@ -55,7 +69,7 @@ export async function retrieve(db: D1Database, question: string, previousIds: nu
     push(await rows(db, "SELECT id,contact_id,address,relationship,status FROM properties WHERE contact_id=? ORDER BY created_at DESC LIMIT 5", [id]), "property", r => `${r.relationship || "Property"} · ${r.address} · ${r.status || "status not recorded"}`);
     push(await rows(db, "SELECT id,contact_id,related_first_name,related_last_name,relationship_type FROM contact_relationships WHERE contact_id=? LIMIT 10", [id]), "relationship", r => `${r.relationship_type}: ${r.related_first_name || ""} ${r.related_last_name || ""}`);
     push(await rows(db, "SELECT id,contact_id,type,date_value,label FROM relationship_moments WHERE contact_id=? ORDER BY date_value DESC LIMIT 6", [id]), "relationship_moment", r => `${r.label} · ${r.date_value}`, r => r.date_value);
-    push(await rows(db, "SELECT s.id,m.contact_id,s.title,s.detail,s.due_date,s.status FROM communication_suggestions s JOIN communications m ON m.id=s.communication_id WHERE m.contact_id=? AND s.commitment=1 AND s.status NOT IN ('Rejected','Dismissed','Completed') ORDER BY s.due_date LIMIT 6", [id]), "commitment", r => `${r.title} · ${r.detail || ""} · ${r.due_date || "date not set"}`);
+    push(await rows(db, "SELECT s.id,m.contact_id,s.title,s.detail,s.due_date,s.due_time,s.source_excerpt,s.status FROM communication_suggestions s JOIN communications m ON m.id=s.communication_id WHERE m.contact_id=? AND s.commitment=1 AND s.status NOT IN ('Rejected','Dismissed','Completed') ORDER BY s.due_date LIMIT 6", [id]), "commitment", r => `${r.title} · ${r.detail || ""} · ${r.due_date || "date not set"} ${r.due_time || "time not set"} · ${r.source_excerpt || ""}`);
     const cutoff = timeline ? dateAgo(90) : dateAgo(365);
     const topic = summary || timeline || isDraft ? [] : topicTerms(q);
     const filter = topic.length ? ` AND (${topic.map(() => "lower(coalesce(message_transcript,'') || ' ' || coalesce(ai_summary,'')) LIKE ?").join(" OR ")})` : "";
@@ -121,5 +135,5 @@ export async function retrieve(db: D1Database, question: string, previousIds: nu
       push(await rows(db, "SELECT id,contact_id,type,direction,occurred_at,subject,message_transcript FROM communications WHERE contact_id=? AND type=? AND occurred_at<=? ORDER BY occurred_at DESC LIMIT 15", [ids[0], draftSource.type, draftSource.occurred_at]), "communication", r => `${r.type} ${r.direction}: ${r.message_transcript || r.subject || ""}`, r => r.occurred_at);
     }
   }
-  return { records: records.slice(0, 55).map(r => ({ ...r, relativeDates: r.kind === "communication" && r.message_transcript && r.occurred_at ? dateMentions(r.message_transcript, r.occurred_at) : [], message_transcript: compact(r.message_transcript), body: compact(r.body) })), evidence: evidence.slice(0, 55), tools, contactIds: [...new Set(contactIds)].slice(0, 30), totalMatches: totalMatches || evidence.length, draftSource };
+  return { records: records.slice(0, 55).map(r => ({ ...r, relativeDates: r.kind === "communication" && r.message_transcript && r.occurred_at ? dateMentions(r.message_transcript, r.occurred_at) : [], message_transcript: compact(r.message_transcript), body: compact(r.body) })), evidence: evidence.slice(0, 55), tools, contactIds: [...new Set(contactIds)].slice(0, 30), resolvedContactId: named.id, totalMatches: totalMatches || evidence.length, draftSource };
 }

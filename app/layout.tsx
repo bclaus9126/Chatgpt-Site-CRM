@@ -4,6 +4,8 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "Claus CRM",
   description: "Private relationship-first real estate CRM.",
+  manifest: "/manifest.webmanifest",
+  appleWebApp: { capable: true, title: "Claus CRM", statusBarStyle: "default" },
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",

@@ -29,10 +29,16 @@ import {
   Play,
   Square,
   Sparkles,
+  ClipboardList,
+  CalendarRange,
 } from "lucide-react";
 import { relationshipOptions, intentOptions, stageGroups, stageOptions } from "@/lib/contact-classification";
 import { splitContactAddress } from "@/lib/contact-address";
-import { ClausAI, AiProviderStatus, AiContactDrafts } from "./claus-ai";
+import { parseCsv } from "@/lib/fub-import";
+import { ClausAI, AiProviderStatus, AiContactDrafts, AiUsageStatus } from "./claus-ai";
+import { Transactions, BuyerCriteria, ContactTransactions } from "./transactions";
+import { Campaigns, ContactCampaign } from "./campaigns";
+import { ReviewPage, reviewItems, reviewPriority, sourceName, type ReviewItem } from "./review";
 type Rec = Record<string, any>;
 type Data = {
   contacts: Rec[];
@@ -63,10 +69,12 @@ const empty: Data = {
 const nav = [
   ["Today", LayoutDashboard],
   ["Contacts", Users],
-  ["Opportunities", Handshake],
+  ["Transactions", Handshake],
   ["Tasks", CheckSquare],
   ["Communications", MessagesSquare],
   ["Claus AI", Sparkles],
+  ["Review", ClipboardList],
+  ["Campaigns", CalendarRange],
   ["Settings", Settings],
 ] as const;
 const today = () => {
@@ -142,7 +150,32 @@ export default function Home() {
     [search, setSearch] = useState(""),
     [modal, setModal] = useState(""),
     [mobile, setMobile] = useState(false);
+  const [transactionId,setTransactionId]=useState<number|null>(null);
   const [aiContactId, setAiContactId] = useState<number | null>(null);
+  const [reviewContactId, setReviewContactId] = useState<number | null>(null);
+  const [reviewSourceAnchor, setReviewSourceAnchor] = useState("");
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const tx=Number(params.get("transaction"));
+    if(tx){setTransactionId(tx);setView("Transactions");window.history.replaceState({},"","/");return;}
+    const contactId = Number(params.get("sms_contact")||params.get("contact"));
+    const messageId = Number(params.get("sms_message"));
+    if (contactId && data.contacts.length) {
+      const contact = data.contacts.find(c => Number(c.id) === contactId);
+      if (contact) { setSelected(contact); setView("Contacts"); if (messageId||params.get("communication")) setReviewSourceAnchor(`communication-${messageId||params.get("communication")}`);else if(params.get("profile"))setReviewSourceAnchor("buyer-criteria"); }
+      window.history.replaceState({}, "", "/");
+    } else if (params.has("unmatched_sms")) { setView("Communications"); }
+  }, [data.contacts]);
+  useEffect(() => {
+    if (!selected || !reviewSourceAnchor) return;
+    let attempts = 0;
+    const timer = window.setInterval(() => {
+      const target = document.getElementById(reviewSourceAnchor);
+      if (target) {target.scrollIntoView({behavior:"smooth",block:"center"});setReviewSourceAnchor("");window.clearInterval(timer);}
+      else if (++attempts > 30) window.clearInterval(timer);
+    },100);
+    return () => window.clearInterval(timer);
+  },[selected,reviewSourceAnchor]);
   async function load() {
     try {
       const r = await fetch("/api/crm");
@@ -167,7 +200,17 @@ export default function Home() {
       setError("That change was not saved. Please try again.");
       return false;
     }
-    setData(await r.json());
+    const result = await r.json();
+    setData(result);
+    if (payload.action === "addContact" && result.createdContactId) {
+      const contact = result.contacts.find((c: Rec) => Number(c.id) === Number(result.createdContactId));
+      if (contact) {
+        setSelected(contact);
+        setView("Contacts");
+        setMobile(false);
+        setReviewSourceAnchor("");
+      }
+    }
     setModal("");
     return true;
   }
@@ -214,6 +257,13 @@ export default function Home() {
     setView(n);
     setSelected(null);
     setMobile(false);
+    if (n === "Review") setReviewContactId(null);
+  };
+  const openReview = (contactId: number | null = null) => {setReviewContactId(contactId);setSelected(null);setView("Review");setMobile(false);};
+  const openReviewSource = (item: ReviewItem) => {
+    setReviewSourceAnchor(`communication-${item.communication_id}`);
+    setSelected(item.contact);
+    setView("Contacts");
   };
   return (
     <div className={`app-shell${selected || view === "Contacts" ? " contacts-font-up" : ""}`}>
@@ -237,6 +287,7 @@ export default function Home() {
             >
               <I />
               <span>{n}</span>
+              {n === "Review" && reviewItems(data).length > 0 && <i>{reviewItems(data).length}</i>}
               {n === "Tasks" &&
                 data.tasks.filter(
                   (t) => t.status !== "Completed" && t.due_date < today(),
@@ -317,6 +368,8 @@ export default function Home() {
               reload={load}
               back={() => setSelected(null)}
               askAi={() => { setAiContactId(Number(selected.id)); setSelected(null); setView("Claus AI"); }}
+              openReview={() => openReview(Number(selected.id))}
+              openTransaction={(id:number)=>{setSelected(null);setTransactionId(id||null);setView("Transactions");}}
             />
           ) : view === "Today" ? (
             <TodayDashboard
@@ -324,16 +377,12 @@ export default function Home() {
               open={(c) => setSelected(c)}
               go={go}
               act={act}
+              openReview={openReview}
             />
           ) : view === "Contacts" ? (
             <Contacts contacts={filtered} open={setSelected} />
-          ) : view === "Opportunities" ? (
-            <Opportunities
-              data={data}
-              open={(id) =>
-                setSelected(data.contacts.find((c) => c.id === id) || null)
-              }
-            />
+          ) : view === "Transactions" ? (
+            <Transactions data={data} initialId={transactionId} clearInitial={()=>setTransactionId(null)} openContact={(id,anchor)=>{setSelected(data.contacts.find(c=>Number(c.id)===id)||null);setView("Contacts");if(anchor)setReviewSourceAnchor(anchor);}}/>
           ) : view === "Tasks" ? (
             <Tasks
               data={data}
@@ -349,13 +398,17 @@ export default function Home() {
               const contact = data.contacts.find(c => Number(c.id) === id);
               if (contact) { setSelected(contact); if (anchor) setTimeout(() => document.getElementById(anchor)?.scrollIntoView({ behavior: "smooth", block: "center" }), 100); }
             }} />
+          ) : view === "Campaigns" ? (
+            <Campaigns contacts={data.contacts} />
+          ) : view === "Review" ? (
+            <ReviewPage data={data} contactId={reviewContactId} openSource={openReviewSource} reload={load} />
           ) : (
             <SettingsPage act={act} />
           )}
         </div>
       </main>
       {modal === "contact" && (
-        <ContactModal close={() => setModal("")} act={act} />
+        <ContactModal contacts={data.contacts} close={() => setModal("")} act={act} />
       )}
     </div>
   );
@@ -369,8 +422,10 @@ function Loading() {
     </div>
   );
 }
-function TodayDashboard({ data, open, go, act }: { data: Data; open: (c: Rec) => void; go: (s: string) => void; act: (p: Rec) => Promise<boolean> }) {
+function TodayDashboard({ data, open, go, act, openReview }: { data: Data; open: (c: Rec) => void; go: (s: string) => void; act: (p: Rec) => Promise<boolean>; openReview: (contactId?:number|null)=>void }) {
   const [now, setNow] = useState(() => new Date());
+  const [campaignIssues,setCampaignIssues] = useState<Rec[]>([]);
+  useEffect(() => {const get=async()=>{try {const r=await fetch("/api/campaigns");if(r.ok){const body=await r.json() as Rec;setCampaignIssues((body.executions||[]).filter((x:Rec)=>["failed","blocked","manual"].includes(x.status)));}}catch{}};get();},[]);
   const [editing, setEditing] = useState<Rec | null>(null);
   const [draftDate, setDraftDate] = useState("");
   useEffect(() => { const timer = window.setInterval(() => setNow(new Date()), 60000); return () => window.clearInterval(timer); }, []);
@@ -385,7 +440,10 @@ function TodayDashboard({ data, open, go, act }: { data: Data; open: (c: Rec) =>
   const ordinaryTasks = tasks.filter(t => !promises.includes(t));
   const overdueFollowups = data.contacts.filter(c => c.next_follow_up && c.next_follow_up.slice(0,10) < day).sort((a,b) => a.next_follow_up.localeCompare(b.next_follow_up));
   const dueFollowups = data.contacts.filter(c => c.next_follow_up?.slice(0,10) === day);
-  const inbound = data.communications.filter(m => m.direction?.toLowerCase().includes("inbound") && m.contact_id && !m.is_sample && (!m.occurred_at || Date.now() - storedDateTime(m.occurred_at).getTime() < 14 * 864e5)).filter(m => !data.communications.some(other => other.contact_id === m.contact_id && other.direction?.toLowerCase().includes("outbound") && storedDateTime(other.occurred_at).getTime() > storedDateTime(m.occurred_at).getTime())).sort((a,b) => storedDateTime(b.occurred_at).getTime() - storedDateTime(a.occurred_at).getTime());
+  const inbound = data.communications.filter(m => m.direction?.toLowerCase().includes("inbound") && m.contact_id && !m.is_sample && (!m.occurred_at || Date.now() - storedDateTime(m.occurred_at).getTime() < 14 * 864e5)).filter(m => !data.communications.some(other => other.contact_id === m.contact_id && other.direction?.toLowerCase().includes("outbound") && (other.source_system !== "telnyx" || !["sms","text"].includes(String(other.type).toLowerCase()) ? !/fail|reject|undeliver|cancel/i.test(String(other.status || "")) : String(other.status).toLowerCase() === "delivered") && storedDateTime(other.occurred_at).getTime() > storedDateTime(m.occurred_at).getTime())).sort((a,b) => storedDateTime(b.occurred_at).getTime() - storedDateTime(a.occurred_at).getTime());
+  const pendingIntelligence = reviewItems(data);
+  const reviewSources = ["Calls","Texts","Emails","Voice Memos"].map(source => [source,pendingIntelligence.filter(item=>sourceName(item.communication.type)===source).length] as const).filter(([,count])=>count);
+  const urgentReview = [...pendingIntelligence].filter(item=>reviewPriority(item)<=3).sort((a,b)=>reviewPriority(a)-reviewPriority(b)).slice(0,3);
   const moments = data.relationshipMoments.filter(m => { const d = m.date_value?.slice(5,10); if (!d) return false; const thisYear = `${day.slice(0,4)}-${d}`; let offset = (Date.parse(`${thisYear}T12:00:00Z`) - Date.parse(`${day}T12:00:00Z`)) / 864e5; if (offset < 0) offset = (Date.parse(`${Number(day.slice(0,4))+1}-${d}T12:00:00Z`) - Date.parse(`${day}T12:00:00Z`)) / 864e5; return offset >= 0 && offset <= 7; });
   const jump = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
   const schedule = (item: Rec) => { setEditing(item); setDraftDate(item.due_date?.slice(0,10) || day); };
@@ -395,12 +453,14 @@ function TodayDashboard({ data, open, go, act }: { data: Data; open: (c: Rec) =>
   return <div className="today-board"><section className="today-intro"><span>{new Intl.DateTimeFormat("en-US", { timeZone:"America/Chicago", weekday:"long", month:"long", day:"numeric" }).format(now)}</span><h2>Good {Number(new Intl.DateTimeFormat("en-US",{timeZone:"America/Chicago",hour:"numeric",hourCycle:"h23"}).format(now)) < 12 ? "morning" : "afternoon"}, Brad.</h2><p>Here’s what needs your attention.</p><div className="today-counts">{[["Overdue follow-ups",overdueFollowups.length,"overdue-followups"],["Tasks due",tasks.length,"today-tasks"],["Appointments",appointments.length,"today-appointments"],["Recent inbound",inbound.length,"recent-inbound"],["Open promises",promises.length,"promises"]].map(([label,count,id]) => <button key={String(id)} onClick={() => jump(String(id))}><b>{count}</b> {label}</button>)}</div></section>
   {section("overdue-followups","Overdue Follow-Ups",overdueFollowups.length,"No overdue follow-ups.",overdueFollowups.map(c => <div className="today-row urgent" key={c.id}><div><button className="today-link" onClick={() => open(c)}><strong>{name(c)}</strong></button><span>{overdueDays(c.next_follow_up)} days overdue · {[c.relationship,c.intent,c.stage].filter(Boolean).join(" · ")}</span><small>Last contact: {when(c.last_meaningful_contact)}{c.recommended_next_action ? ` · ${c.recommended_next_action}` : ""}</small></div><span className="today-actions">{contactActions(c)}<button onClick={() => act({action:"completeFollowUp",contactId:c.id})}>Complete</button><button onClick={() => schedule({contact_id:c.id,followup:true,due_date:c.next_follow_up})}>Reschedule</button></span></div>))}
   {section("today-appointments","Today’s Appointments",appointments.length,"No appointments today.",appointments.map(t => { const c=contact(t.contact_id); let detail: Rec={}; try {detail=JSON.parse(t.details||"{}");} catch {} return <div className="today-row" key={t.id}><div><strong>{t.due_time || "Time not set"} · {t.title}</strong><span><button className="today-link" onClick={() => openContact(t.contact_id)}>{t.contact_name}</button>{detail.location ? ` · ${detail.location}` : ""}</span>{detail.propertyAddress && <small>{detail.propertyAddress}</small>}<small>{t.calendar_sync_status === "synced" ? "Synced to Outlook" : t.calendar_sync_status === "failed" ? "Sync failed" : "Calendar sync pending"}{t.notes ? ` · ${t.notes}` : ""}</small></div><span className="today-actions">{c && contactActions(c)}{detail.propertyAddress && <a target="_blank" rel="noopener noreferrer" href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(detail.propertyAddress)}`}>Directions</a>}<button onClick={() => act({action:"completeTask",id:t.id})}>Completed</button><button onClick={() => schedule(t)}>Reschedule</button>{t.calendar_sync_status === "failed" && <button onClick={async()=>{await fetch("/api/microsoft/calendar/retry",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({id:t.id})});window.location.reload();}}>Retry sync</button>}</span></div>; }))}
+  {campaignIssues.length>0 && section("campaign-issues","Campaigns needing attention",campaignIssues.length,"",campaignIssues.map(x=><div className="today-row" key={x.id}><div><strong>{x.channel} · {x.status}</strong><small>{x.error||x.skipped_reason||"Review the campaign step"}</small></div><button onClick={()=>go("Campaigns")}>Open Campaigns</button></div>))}
   {section("today-tasks","Tasks Due / Overdue",ordinaryTasks.length,"You’re caught up on tasks due today.",ordinaryTasks.sort((a,b)=>(a.due_date||"").localeCompare(b.due_date||"")).map(taskRow))}
+  <section className="today-section"><h3>Pending Intelligence <span>{pendingIntelligence.length}</span></h3>{pendingIntelligence.length ? <><p>{pendingIntelligence.length} recommendations need review · {reviewSources.map(([source,count])=>`${count} ${source}`).join(" · ")}</p><button className="review-now" onClick={()=>openReview()}>Review Now</button>{urgentReview.map(item=><div className="today-row" key={item.id}><div><strong>{item.contact.first_name} {item.contact.last_name} · {item.category}</strong><small>{item.title}</small></div><button onClick={()=>openReview(Number(item.contact.id))}>Review</button></div>)}</> : <p className="today-empty">You're caught up. No intelligence recommendations need review.</p>}</section>
   {section("recent-inbound","Recent Inbound",inbound.length,"No unanswered inbound messages in the last 14 days.",inbound.slice(0,20).map(m => <div className="today-row" key={m.id}><div><button className="today-link" onClick={() => openContact(m.contact_id)}><strong>{name(contact(m.contact_id))}</strong></button><span>{m.type} · {whenDetailed(m.occurred_at)} · No later outbound response recorded</span><small>{(m.message_transcript || m.subject || m.ai_summary || "Inbound communication").slice(0,180)}</small></div>{contact(m.contact_id) && contactActions(contact(m.contact_id)!)}</div>))}
   {section("promises","Promises & Commitments",promises.length,"No open promises with a due date.",promises.map(taskRow))}
   {section("followups-today","Follow-Ups Today",dueFollowups.length,"No follow-ups scheduled today.",dueFollowups.map(c => <div className="today-row" key={c.id}><div><button className="today-link" onClick={() => open(c)}><strong>{name(c)}</strong></button><span>{c.recommended_next_action || "Follow up"} · {c.stage || "Stage unknown"}</span><small>Last contact: {when(c.last_meaningful_contact)}</small></div><span className="today-actions">{contactActions(c)}<button onClick={() => act({action:"completeFollowUp",contactId:c.id})}>Complete</button><button onClick={() => schedule({contact_id:c.id,followup:true,due_date:c.next_follow_up})}>Reschedule</button></span></div>))}
   {section("relationship-moments","Relationship Moments",moments.length,"No relationship moments in the next 7 days.",moments.map(m => <div className="today-row" key={m.id}><div><strong>{m.label || m.type}</strong><span><button className="today-link" onClick={() => openContact(m.contact_id)}>{name(contact(m.contact_id))}</button> · {m.date_value?.slice(5,10)}</span></div>{contact(m.contact_id) && contactActions(contact(m.contact_id)!)}</div>))}
-  <div className="today-footer"><button onClick={() => go("Tasks")}>View all tasks</button><button onClick={() => go("Opportunities")}>View transactions</button></div>
+  <div className="today-footer"><button onClick={() => go("Tasks")}>View all tasks</button><button onClick={() => go("Transactions")}>View transactions</button></div>
   {editing && <Modal title={editing.followup ? "Reschedule follow-up" : "Reschedule item"} close={() => setEditing(null)}><form onSubmit={async e => { e.preventDefault(); if (await act(editing.followup ? {action:"rescheduleFollowUp",contactId:editing.contact_id,dueDate:draftDate} : {action:"rescheduleTask",id:editing.id,dueDate:draftDate})) setEditing(null); }}><label>New date<input type="date" required value={draftDate} onChange={e=>setDraftDate(e.target.value)}/></label><div className="today-actions"><button type="button" onClick={() => setEditing(null)}>Cancel</button><button type="submit">Save date</button></div></form></Modal>}
   </div>;
 }
@@ -682,90 +742,6 @@ function Contacts({
     </section>
   );
 }
-function Opportunities({
-  data,
-  open,
-}: {
-  data: Data;
-  open: (id: number) => void;
-}) {
-  return (
-    <>
-      <div className="summary-row">
-        <article>
-          <small>Pipeline value</small>
-          <b>
-            {money(
-              data.opportunities.reduce(
-                (a, o) => a + (o.estimated_price || 0),
-                0,
-              ),
-            )}
-          </b>
-        </article>
-        <article>
-          <small>Projected commission</small>
-          <b>
-            {money(
-              data.opportunities.reduce(
-                (a, o) =>
-                  a +
-                  ((o.estimated_commission || 0) * (o.probability || 0)) / 100,
-                0,
-              ),
-            )}
-          </b>
-        </article>
-        <article>
-          <small>Open opportunities</small>
-          <b>
-            {
-              data.opportunities.filter(
-                (o) => !["Closed", "Lost"].includes(o.stage),
-              ).length
-            }
-          </b>
-        </article>
-      </div>
-      <section className="pipeline">
-        {[
-          "New Lead",
-          "Connected",
-          "Nurture",
-          "Appointment Set",
-          "Active Client",
-          "Under Contract",
-        ].map((stage) => (
-          <div className="column" key={stage}>
-            <h3>
-              {stage}
-              <span>
-                {data.opportunities.filter((o) => o.stage === stage).length}
-              </span>
-            </h3>
-            {data.opportunities
-              .filter((o) => o.stage === stage)
-              .map((o) => (
-                <button
-                  className="opp"
-                  key={o.id}
-                  onClick={() => open(o.contact_id)}
-                >
-                  <small>{o.type}</small>
-                  <b>{o.contact_name}</b>
-                  <span>{money(o.estimated_price)}</span>
-                  <p>{o.expected_timeframe}</p>
-                  <div>
-                    <i style={{ width: `${o.probability || 0}%` }} />
-                  </div>
-                </button>
-              ))}
-          </div>
-        ))}
-      </section>
-    </>
-  );
-}
 function Tasks({
   data,
   act,
@@ -837,6 +813,8 @@ function Tasks({
   );
 }
 function Communications() {
+  const [unmatched,setUnmatched] = useState<Rec | null>(null);
+  useEffect(() => { const id = new URLSearchParams(window.location.search).get("unmatched_sms"); if (id) fetch(`/api/push/unmatched?id=${encodeURIComponent(id)}`).then(r=>r.ok?r.json():null).then((value: Rec | null)=>setUnmatched(value)).catch(()=>{}); },[]);
   const [events, setEvents] = useState<Rec[]>([]),
     [loading, setLoading] = useState(true),
     [error, setError] = useState("");
@@ -859,6 +837,7 @@ function Communications() {
   }, []);
   return (
     <section className="panel telnyx-log">
+      {unmatched && <article id={`communication-${unmatched.id}`} className="panel unmatched-sms"><h2>Text from {unmatched.from_number}</h2><time>{whenDetailed(unmatched.occurred_at)}</time><p>{unmatched.message_transcript || "Image received"}</p></article>}
       <PanelHead
         title="Telnyx event log"
         sub="The 100 most recent verified voice events"
@@ -929,6 +908,8 @@ function SettingsPage({ act }: { act: (p: Rec) => Promise<boolean> }) {
         <button className={section === "Data Import" ? "active" : ""} onClick={() => setSection("Data Import")}><FileSpreadsheet /> Data Import</button>
       </aside>
       {section === "Data Import" ? <FubImporter act={act} /> : <div className="settings-grid">
+        <CampaignSchedulerStatus />
+        <MobileNotifications />
         <article className="panel">
           <h2>Workspace</h2>
           <label>CRM name<input value="Claus CRM" readOnly /></label>
@@ -938,13 +919,100 @@ function SettingsPage({ act }: { act: (p: Rec) => Promise<boolean> }) {
         <article className="panel">
           <h2>Connections</h2>
           <div className="future"><span>Telnyx calling</span><Badge>Available</Badge></div>
+          <TelnyxMessagingStatus />
           <div className="future"><span>Follow Up Boss imports</span><Badge>Available</Badge></div>
           <AiProviderStatus />
           <MicrosoftConnection />
         </article>
+        <AiUsageStatus />
       </div>}
     </section>
   );
+}
+
+function CampaignSchedulerStatus() {
+  const [health,setHealth]=useState<Rec|null>(null),[message,setMessage]=useState("");
+  const refresh=async()=>{try{const r=await fetch('/api/campaigns/health');if(!r.ok)throw Error();setHealth(await r.json());}catch{setMessage('Scheduler status unavailable.');}};
+  useEffect(()=>{refresh();const timer=setInterval(refresh,60000);return()=>clearInterval(timer);},[]);
+  const change=async(enabled:boolean)=>{setMessage('');try{const r=await fetch('/api/campaigns/health',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({automaticSendingEnabled:enabled})});if(!r.ok)throw Error();setHealth(await r.json());}catch{setMessage('Could not update automatic sending.');}};
+  const date=(value:unknown)=>value?new Date(String(value)).toLocaleString():'Never';
+  return <article className="panel campaign-scheduler"><h2>Campaign Scheduler</h2>
+    <p role="status">{health?.status==='healthy'?'Scheduler calling regularly':'Campaign scheduler has not run in 15 minutes.'}</p>
+    <label className="notification-option"><input type="checkbox" checked={!!health?.automaticSendingEnabled} disabled={!health} onChange={e=>change(e.target.checked)} /> Campaign Automatic Sending: {health?.automaticSendingEnabled?'ON':'OFF'}</label>
+    <p>Last runner call: {date(health?.lastRunnerCall)}</p><p>Last successful run: {date(health?.lastSuccess)}</p><p>Last failure: {date(health?.lastFailure)}{health?.lastFailureReason?` · ${health.lastFailureReason}`:''}</p>
+    <p>Steps processed in last run: {health?.stepsProcessed??'—'}</p><p>Next due campaign action: {date(health?.nextDue)}</p>
+    {!health?.secretConfigured&&<p>Scheduler secret needs configuration.</p>}{message&&<p role="alert">{message}</p>}
+  </article>;
+}
+
+function MobileNotifications() {
+  const [state,setState] = useState<Rec | null>(null),[subscribed,setSubscribed] = useState(false),[message,setMessage] = useState(""),[busy,setBusy] = useState(false);
+  const supported = typeof window !== "undefined" && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+  const refresh = async () => {
+    try {
+      const r = await fetch("/api/push"); if (!r.ok) throw Error("Notification settings unavailable");
+      setState(await r.json());
+      if (supported) { const reg = await navigator.serviceWorker.register("/sw.js"); setSubscribed(!!await reg.pushManager.getSubscription()); }
+    } catch(e) { setMessage(e instanceof Error ? e.message : "Notifications unavailable"); }
+  };
+  useEffect(() => { refresh(); }, []);
+  const request = async (action: "subscribe"|"unsubscribe") => {
+    setBusy(true); setMessage("");
+    try {
+      const reg = await navigator.serviceWorker.register("/sw.js");
+      let sub = await reg.pushManager.getSubscription();
+      if (action === "subscribe") {
+        if (Notification.permission !== "granted" && await Notification.requestPermission() !== "granted") throw Error("Notification permission is blocked. Enable it in your browser or phone settings, then try again.");
+        if (!state?.publicKey) throw Error("Push is not configured on the server.");
+        if (!sub) {
+          const raw = atob(state.publicKey.replace(/-/g,"+").replace(/_/g,"/").padEnd(Math.ceil(state.publicKey.length/4)*4,"="));
+          const key = Uint8Array.from(raw,c=>c.charCodeAt(0));
+          sub = await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:key});
+        }
+        const r = await fetch("/api/push",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action,subscription:sub.toJSON(),deviceName:navigator.userAgent.slice(0,120)})});
+        if (!r.ok) throw Error("Device registration failed");
+        setMessage("Notifications enabled on this device.");
+      } else if (sub) {
+        const r = await fetch("/api/push",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action,endpoint:sub.endpoint})});
+        if (!r.ok) throw Error("Could not remove device registration");
+        await sub.unsubscribe(); setMessage("Notifications disabled on this device.");
+      }
+      await refresh();
+    } catch(e) {setMessage(e instanceof Error ? e.message : "Could not change notification settings");}
+    finally {setBusy(false);}
+  };
+  const update = async (key:string,value:boolean|string) => {
+    if (!state) return;
+    const settings = {...state.settings,[key]:value}; setState({...state,settings});
+    try { const r=await fetch("/api/push",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"settings",settings})}); if (!r.ok) throw Error(); }
+    catch {setMessage("Could not save notification preferences.");await refresh();}
+  };
+  const settings = state?.settings || {};
+  return <article className="panel mobile-notifications"><h2>Mobile Notifications</h2>
+    <p>Get new inbound texts on subscribed phones and browsers. On iPhone, add Claus CRM to your Home Screen first, then open it from the icon to enable push.</p>
+    <p>Current device: {!supported ? "Push unavailable in this browser" : Notification.permission === "denied" ? "Permission blocked" : subscribed ? "Subscribed" : "Not subscribed"} · Active devices: {state?.activeDevices ?? "—"}</p>
+    {supported && <button type="button" disabled={busy || !state?.publicKey} onClick={() => request(subscribed ? "unsubscribe" : "subscribe")}>{busy ? "Working…" : subscribed ? "Disable on this device" : "Enable on this device"}</button>}
+    {state && !state.publicKey && <p>Push setup is incomplete on the server.</p>}
+    {[["inboundSms","Inbound SMS"],["unknownSms","Unknown numbers"],["preview","Show message preview"],["quietHours","Quiet hours"]].map(([key,label]) => <label className="notification-option" key={key}><input type="checkbox" checked={!!settings[key]} onChange={e=>update(key,e.target.checked)} /> {label}</label>)}
+    {settings.quietHours && <div className="notification-times"><label>Start <input type="time" value={settings.quietStart} onChange={e=>update("quietStart",e.target.value)} /></label><label>End <input type="time" value={settings.quietEnd} onChange={e=>update("quietEnd",e.target.value)} /></label><small>America/Chicago</small></div>}
+    {message && <p role="status">{message}</p>}
+  </article>;
+}
+
+function TelnyxMessagingStatus() {
+  const [state,setState] = useState<Rec | null>(null), [message,setMessage] = useState(""), [busy,setBusy] = useState(false);
+  const refresh = async () => { try { const r = await fetch("/api/telnyx/messaging-config"); const data = await r.json() as Rec; if (!r.ok) throw Error(String(data.error)); setState(data); } catch(e) { setMessage(e instanceof Error ? e.message : "Messaging status unavailable"); } };
+  useEffect(() => { refresh(); },[]);
+  const action = async (value: Rec) => { setBusy(true); setMessage(""); try { const r = await fetch("/api/telnyx/messaging-config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(value)}); const data = await r.json() as Rec; if (!r.ok) throw Error(String(data.error)); await refresh(); setMessage("Telnyx messaging settings saved."); } catch(e) { setMessage(e instanceof Error ? e.message : "Could not save settings"); } finally { setBusy(false); } };
+  const enabled = state?.enabled ? JSON.parse(state.enabled).enabled !== false : true;
+  return <div className="future" style={{display:"block"}}><strong>Telnyx messaging</strong>
+    {state && <><p>Business number: {state.businessNumber}</p><p>Profile: {state.profileName || "Unassigned"} {state.profileId ? `(${state.profileId})` : ""}</p><p>Campaign: {state.campaignId || "Not reported"} {state.campaignAssignment || ""}</p><p>Webhook: {state.webhookUrl || "Not connected"}</p>
+      {!state.profileId && (!state.campaignAssignment || state.campaignAssignment === "ASSIGNED") && state.availableProfiles?.length === 1 && <button disabled={busy} onClick={() => action({action:"assign-profile"})}>Assign business number to Brad CRM</button>}
+      {state.profileId && state.webhookUrl !== state.expectedWebhookUrl && <button disabled={busy} onClick={() => action({action:"connect-webhook"})}>Connect SMS webhook</button>}
+      {!state.profileId && <p>{state.numberFound ? "The business number has no messaging profile assignment." : "The business number was not found in this Telnyx account’s messaging number list."}</p>}
+      {!state.profileId && (state.availableProfiles || []).map((profile:Rec) => <p key={profile.id}>Available profile: {profile.name} ({profile.id}) · Webhook: {profile.webhookUrl || "not connected"}</p>)}
+      {state.callNoticesAvailable && <label style={{display:"block"}}><input type="checkbox" checked={enabled} onChange={e => action({action:"call-notices",enabled:e.target.checked})} disabled={busy} /> Text me contact context on inbound calls</label>}</>}
+    {message && <p role="status">{message}</p>}</div>;
 }
 
 function MicrosoftConnection() {
@@ -1027,18 +1095,46 @@ function MicrosoftConnection() {
 function FubImporter({ act }: { act: (p: Rec) => Promise<boolean> }) {
   const [file, setFile] = useState<File | null>(null), [analysis, setAnalysis] = useState<Rec | null>(null),
     [jobs, setJobs] = useState<Rec[]>([]), [busy, setBusy] = useState(""), [message, setMessage] = useState(""),
-    [decisions, setDecisions] = useState<Record<string, string>>({}), [jobRows, setJobRows] = useState<Record<string, Rec[]>>({});
+    [decisions, setDecisions] = useState<Record<string, string>>({}), [jobRows, setJobRows] = useState<Record<string, Rec[]>>({}),
+    [activeJobId, setActiveJobId] = useState<number | null>(null);
   const loadJobs = async () => { const r = await fetch("/api/imports/fub"); if (r.ok) setJobs((await r.json()).jobs || []); };
   useEffect(() => { loadJobs(); }, []);
   const submit = async (mode: "analyze" | "import") => {
     if (!file) return;
     setBusy(mode); setMessage("");
-    const form = new FormData(); form.append("file", file); form.append("decisions", JSON.stringify(decisions));
     try {
-      const r = await fetch(`/api/imports/fub?mode=${mode}`, { method: "POST", body: form });
-      const body = await r.json(); if (!r.ok) throw Error(body.error || "Import failed");
-      if (mode === "analyze") { setAnalysis(body.analysis); setDecisions(Object.fromEntries((body.analysis.duplicates || []).map((d: Rec) => [String(d.row), "skip"]))); }
-      else { setMessage(`${body.imported} contacts imported. ${body.skipped} held for duplicate review.`); setAnalysis(null); setFile(null); await loadJobs(); }
+      if (mode === "analyze") {
+        const form = new FormData(); form.append("file", file);
+        const r = await fetch("/api/imports/fub?mode=analyze", { method: "POST", body: form });
+        const body = await r.json() as Rec; if (!r.ok) throw Error(body.error || "Analysis failed");
+        setAnalysis(body.analysis);
+        setDecisions(Object.fromEntries((body.analysis.duplicates || []).map((d: Rec) => [String(d.row), "skip"])));
+      } else if (analysis) {
+        const { records } = parseCsv(await file.text());
+        if (records.length !== analysis.total) throw Error("The selected file has changed. Analyze it again before importing.");
+        const send = async (action: string, payload: Rec) => {
+          const response = await fetch(`/api/imports/fub?mode=${action}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+          const result = await response.json() as Rec; if (!response.ok) throw Error(result.error || "Import failed"); return result;
+        };
+        const jobId = activeJobId ?? (await send("start", { fileName: file.name, total: records.length, warningCount: analysis.unknownColumns?.length || 0, duplicateCount: analysis.duplicates?.length || 0 })).jobId;
+        setActiveJobId(jobId);
+        let imported = 0, skipped = 0;
+        try {
+          for (let offset = 0; offset < records.length; offset += 10) {
+            const batch = await send("chunk", { jobId, offset, records: records.slice(offset, offset + 10) });
+            imported += batch.imported; skipped += batch.skipped;
+            setMessage(`Imported ${Math.min(offset + 10, records.length)} of ${records.length} rows…`);
+          }
+          await send("finish", { jobId });
+          const completed = await fetch("/api/imports/fub").then(response => response.json()) as Rec;
+          const finalJob = (completed.jobs || []).find((item: Rec) => item.id === jobId);
+          setMessage(`${finalJob?.imported_records ?? imported} contacts imported. ${finalJob?.skipped_records ?? skipped} held for duplicate review.`);
+          setAnalysis(null); setFile(null); setActiveJobId(null);
+        } catch (error) {
+          setMessage(`Import paused. ${error instanceof Error ? error.message : "Please try again."} Select Import again to resume this file.`);
+        }
+        await loadJobs();
+      }
     } catch (e) { setMessage(e instanceof Error ? e.message : "The file could not be processed."); }
     finally { setBusy(""); }
   };
@@ -1064,20 +1160,19 @@ function FubImporter({ act }: { act: (p: Rec) => Promise<boolean> }) {
     <div className="crumb">Settings <ChevronRight /> Data Import <ChevronRight /> <b>Follow Up Boss</b></div>
     <article className="panel import-hero">
       <div><span className="import-icon"><FileSpreadsheet /></span><h2>Follow Up Boss import</h2><p>Upload a current FUB contact export. Claus CRM will analyze the file before changing any contact data.</p></div>
-      <label className="file-drop"><Upload /><b>{file ? file.name : "Choose FUB CSV"}</b><span>{file ? "Ready to analyze" : "CSV files up to 15 MB"}</span><input type="file" accept=".csv,text/csv" onChange={(e) => { setFile(e.target.files?.[0] || null); setAnalysis(null); setMessage(""); }} /></label>
+      <label className="file-drop"><Upload /><b>{file ? file.name : "Choose FUB CSV"}</b><span>{file ? "Ready to analyze" : "Choose a CSV export"}</span><input type="file" accept=".csv,text/csv" onChange={(e) => { setFile(e.target.files?.[0] || null); setAnalysis(null); setActiveJobId(null); setMessage(""); }} /></label>
       <button className="primary" disabled={!file || !!busy} onClick={() => submit("analyze")}>{busy === "analyze" ? "Analyzing…" : "Analyze file"}</button>
       {message && <p className="import-message">{message}</p>}
     </article>
     {analysis && <article className="panel analysis-card">
       <div className="analysis-head"><div><CheckCircle2 /><div><h2>Follow Up Boss export detected</h2><p>Preview complete. Nothing has been imported yet.</p></div></div><Badge>{analysis.total} rows</Badge></div>
       <div className="import-metric-grid">{metrics.map(([label, value]) => <div key={label as string}><b>{value}</b><span>{label}</span></div>)}</div>
-      <div className="review-box"><b>Import review</b><p>{cleanCount} new contacts can be imported. {analysis.duplicates?.length || 0} existing matches will be skipped. Files can contain up to 100 contacts. Merging into existing contacts remains unavailable. Any unrecognized call or text fragment remains in the original source row for review.</p></div>
+      <div className="review-box"><b>Import review</b><p>{cleanCount} new contacts can be imported. {analysis.duplicates?.length || 0} existing matches will be skipped. Merging into existing contacts remains unavailable. Any unrecognized call or text fragment remains in the original source row for review.</p></div>
       {(analysis.unknownColumns?.length > 0 || analysis.errors?.length > 0 || analysis.warnings?.length > 0) && <div className="review-box"><b>Review before import</b><p>{analysis.unknownColumns?.length || 0} unknown columns are preserved in source rows. {analysis.errors?.length || 0} malformed rows block the import. {(analysis.warnings || []).map((w: Rec) => `Row ${w.row}: ${w.message}`).join(" ")}</p></div>}
       <details className="duplicate-review" open><summary>Preview each contact</summary>{(analysis.contacts || []).map((c: Rec) => <div key={c.row}><b>Row {c.row}: {c.name || "Missing name"}</b><span> — {c.match}</span><p>{c.phones} phones · {c.emails} emails · {c.calls} calls · {c.texts} texts · {c.notes} notes · {c.relationships} relationships · {c.referrals} referrals · {c.transactions} transactions</p><small>Birthday: {c.birthday || "—"} · Home anniversary: {c.homeAnniversary || "—"}</small>{c.samples?.length > 0 && <details className="communication-preview"><summary>Inspect parsed calls and texts</summary>{c.samples.map((item: Rec, index: number) => <div key={index}><b>{item.kind} · {new Date(item.timestamp).toLocaleString("en-US", { timeZone: "America/Chicago", dateStyle: "medium", timeStyle: "short" })}</b><span>{item.sender} → {item.recipient} · {item.direction}</span><p>{item.body || "No visible message body"}</p></div>)}</details>}</div>)}</details>
       {analysis.duplicates?.length > 0 && <details className="duplicate-review"><summary>Review {analysis.duplicates.length} possible duplicates</summary>{analysis.duplicates.map((d: Rec) => <div key={d.row}><span>Row {d.row}: {d.name}</span><Badge>{d.type}</Badge><small>{d.reason}; this contact will be skipped.</small></div>)}</details>}
       {cleanCount === 0 && <p className="import-message" role="status">No new contacts to import. Every row matches an existing contact, so importing this file would add nothing. Existing contacts and their history will not be updated by this import.</p>}
-      {analysis.total > 100 && <p className="import-message" role="status">This file has more than 100 contacts. Split it into smaller files to import.</p>}
-      <div className="import-actions"><button onClick={() => setAnalysis(null)}>Choose another file</button><button className="primary" disabled={!!busy || cleanCount === 0 || analysis.total > 100 || analysis.errors?.length > 0} onClick={() => submit("import")}>{busy === "import" ? "Importing…" : `Import ${cleanCount} new contact${cleanCount === 1 ? "" : "s"}`}</button></div>
+      <div className="import-actions"><button onClick={() => setAnalysis(null)}>Choose another file</button><button className="primary" disabled={!!busy || cleanCount === 0 || analysis.errors?.length > 0} onClick={() => submit("import")}>{busy === "import" ? "Importing…" : `Import ${cleanCount} new contact${cleanCount === 1 ? "" : "s"}`}</button></div>
     </article>}
     <article className="panel import-history"><div className="section-head"><div><h2>Import history</h2><p>Every imported row retains its original FUB data and provenance.</p></div><button onClick={() => { if (window.confirm("Normalize classifications from original FUB Stage values? Manually changed contacts will be skipped.")) act({ action: "normalizeFubClassifications" }); }}>Normalize earlier FUB classifications</button></div>
       {jobs.length === 0 ? <p className="empty-copy">No Follow Up Boss imports yet.</p> : <div className="job-table"><div className="job-row job-head"><span>File</span><span>Status</span><span>Imported</span><span>Duplicates</span><span>Errors</span><span></span></div>{jobs.map((job) => <div className="job-entry" key={job.id}><div className="job-row"><span><b>{job.file_name}</b><small>{when(job.created_at)}</small></span><span><Badge>{job.status}</Badge></span><span>{job.imported_records}</span><span>{job.duplicate_records}</span><span>{job.error_count}</span><span className="job-actions"><button onClick={() => inspect(job.id)}>Inspect</button>{job.status !== "Rolled back" && <button className="rollback" onClick={() => rollback(job.id)} disabled={!!busy}><RotateCcw /> Rollback</button>}</span></div>{jobRows[String(job.id)]?.length > 0 && <div className="job-details">{jobRows[String(job.id)].map((row) => <div key={row.row_number}><b>Row {row.row_number}</b><Badge>{row.status}</Badge><span>{row.error || row.warning || row.match_type || "Imported cleanly"}</span></div>)}</div>}</div>)}</div>}
@@ -1092,6 +1187,8 @@ function ContactPage({
   setModal,
   back,
   askAi,
+  openReview,
+  openTransaction,
   reload,
 }: {
   c: Rec;
@@ -1101,9 +1198,14 @@ function ContactPage({
   setModal: (s: string) => void;
   back: () => void;
   askAi: () => void;
+  openReview: () => void;
+  openTransaction: (id:number) => void;
   reload: () => Promise<void>;
 }) {
   const [timelineFilter, setTimelineFilter] = useState("All"),
+    [confirmDelete, setConfirmDelete] = useState(false),
+    [deleting, setDeleting] = useState(false),
+    [deleteError, setDeleteError] = useState(""),
     [tagInput, setTagInput] = useState(""),
     [savingTags, setSavingTags] = useState(false),
     [callState, setCallState] = useState(""),
@@ -1122,6 +1224,19 @@ function ContactPage({
       .split(",")
       .map((tag: string) => tag.trim())
       .filter(Boolean);
+  const deleteContact = async () => {
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      const response = await fetch("/api/crm", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "deleteContact", id: c.id }) });
+      if (!response.ok) throw Error((await response.json() as Rec).error || "Could not delete contact.");
+      setConfirmDelete(false);
+      back();
+      await reload();
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : "Could not delete contact.");
+    } finally { setDeleting(false); }
+  };
   const saveTags = async (nextTags: string[]) => {
     setSavingTags(true);
     await act({ action: "updateTags", contactId: c.id, tags: nextTags });
@@ -1246,6 +1361,7 @@ function ContactPage({
               </h2>
               <button className="identity-edit" onClick={() => setModal("edit-contact")}>Edit contact</button>
               <button className="identity-edit" onClick={askAi}><Sparkles /> Ask Claus AI about this contact</button>
+              {reviewItems(data).filter(item=>Number(item.contact.id)===Number(c.id)).length>0&&<button className="identity-edit" onClick={openReview}><ClipboardList /> Pending Intelligence ({reviewItems(data).filter(item=>Number(item.contact.id)===Number(c.id)).length})</button>}
               {c.is_sample === 1 && <em>SAMPLE DATA</em>}
             </div>
             <p>
@@ -1268,24 +1384,7 @@ function ContactPage({
                   </span>
                 ))}
               </span>
-              <form
-                className="tag-editor"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  addTag();
-                }}
-              >
-                <input
-                  aria-label="New contact tag"
-                  disabled={savingTags}
-                  onChange={(event) => setTagInput(event.target.value)}
-                  placeholder="Add tag"
-                  value={tagInput}
-                />
-                <button disabled={savingTags || !tagInput.trim()} type="submit">
-                  <Plus /> Add
-                </button>
-              </form>
+              <ContactChoices label="Tags" tags contacts={data.contacts} value={c.tags||""} onChange={v=>saveTags(v.split(',').filter(Boolean))}/>
             </div>
           </div>
         </div>
@@ -1309,7 +1408,13 @@ function ContactPage({
               ? "Call active"
               : "Call"}
           </button>
-          <button title="Text integration is not yet available" type="button"><MessageSquare /> Text</button>
+          <button type="button" disabled={!c.phone} onClick={() => {
+            setTimelineFilter("Texts");
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+              document.getElementById("contact-sms-composer")?.scrollIntoView({ behavior: "smooth", block: "center" });
+              document.querySelector<HTMLTextAreaElement>("#contact-sms-composer textarea")?.focus();
+            }));
+          }}><MessageSquare /> Text</button>
           <button onClick={() => setModal("email")} type="button"><Mail /> Email</button>
           <button onClick={() => setModal("note")}>
             <NotebookPen />
@@ -1329,6 +1434,7 @@ function ContactPage({
           <Phone /> {callError || activeCallStatus}
         </div>
       )}
+      <ContactCampaign contact={c} />
       <section className="contact-facts">
         {([ ["Relationship", "relationship", relationshipOptions], ["Intent", "intent", intentOptions], ["Stage", "stage", stageOptions] ] as const).map(([label, field, values]) => <label className="classification-field" key={field}><small>{label}</small><select value={(values as readonly string[]).includes(c[field]) ? c[field] : ""} onChange={(e) => act({ action: "updateClassification", contactId: c.id, field, value: e.target.value })}><option value="" disabled>{c[field] || "Choose"}</option>{values.map((value) => <option key={value}>{value}</option>)}</select></label>)}
         {[
@@ -1366,6 +1472,7 @@ function ContactPage({
               >{filter}</button>
             ))}
           </div>
+          {timelineFilter === "Texts" && <SmsComposer contactId={Number(c.id)} reload={reload} />}
           {["Texts", "Emails"].includes(timelineFilter) && <SmsIntelligence contactId={c.id} channel={timelineFilter === "Emails" ? "email" : "sms"} suggestions={data.communicationSuggestions.filter((suggestion) => comms.some((communication) => communication.id === suggestion.communication_id && (timelineFilter === "Emails" ? communication.type === "Email" : ["SMS", "Text"].includes(communication.type))))} reload={reload} />}
           <div className="unified-timeline">
             {filteredTimeline.length === 0 ? (
@@ -1401,6 +1508,7 @@ function ContactPage({
             </div>)}
           </SidebarSection>}
           <SidebarSection title="Real Estate Profile" open>
+            <BuyerCriteria contactId={Number(c.id)}/>
             {(buyer || buyerFacts.length > 0 || buyerFields.length > 0) && <div className="profile-group"><h4>Buyer Needs</h4>{buyerFields.map(([label,value]) => <CompactField key={label} label={String(label)} value={String(value)} />)}{showFacts(buyerFacts)}{!buyerFields.length && !buyerFacts.length && <p className="compact-empty">No buyer details recorded.</p>}</div>}
             {(seller || sellerFacts.length > 0 || sellerFields.length > 0) && <div className="profile-group"><h4>Seller Details</h4>{sellerFields.map(([label,value]) => <CompactField key={label} label={String(label)} value={String(value)} />)}{showFacts(sellerFacts)}{!sellerFields.length && !sellerFacts.length && <p className="compact-empty">No seller details recorded.</p>}</div>}
             {showFacts(otherFacts)}
@@ -1422,6 +1530,7 @@ function ContactPage({
             {appointments.length === 0 && <p className="compact-empty">No upcoming appointments.</p>}
           </SidebarSection>
           <SidebarSection title="Transactions" open>
+            <ContactTransactions contactId={Number(c.id)} open={openTransaction}/>
             <button className="sidebar-add" onClick={() => setModal("transaction")}><Plus /> Add transaction</button>
             {opps.map(opp => <div className="sidebar-opportunity" key={opp.id}><div><b>{opp.type} · {opp.property_address || "Address to add"}</b><span>{opp.stage}</span></div><button onClick={() => setModal(`transaction:${opp.id}`)}>Edit transaction</button></div>)}
             {opps.length === 0 && <p className="compact-empty">No transactions yet.</p>}
@@ -1439,6 +1548,14 @@ function ContactPage({
           </SidebarSection>}
         </aside>
       </div>
+      <div className="contact-delete-footer"><button type="button" className="contact-delete-button" onClick={() => { setDeleteError(""); setConfirmDelete(true); }}>Delete contact</button></div>
+      {confirmDelete && <Modal title="Delete contact" close={() => { if (!deleting) setConfirmDelete(false); }}>
+        <div className="contact-delete-confirm">
+          <p>Delete <strong>{c.display_name || `${c.first_name} ${c.last_name}`}</strong> and their linked CRM history, including notes, tasks, transactions, calls, texts, and emails? This cannot be undone.</p>
+          {deleteError && <p role="alert" className="recorder-error">{deleteError}</p>}
+          <div><button type="button" disabled={deleting} onClick={() => setConfirmDelete(false)}>Cancel</button><button type="button" className="contact-delete-button" disabled={deleting} onClick={deleteContact}>{deleting ? "Deleting…" : "Delete contact"}</button></div>
+        </div>
+      </Modal>}
       {modal === "note" && (
         <NoteModal c={c} close={() => setModal("")} act={act} />
       )}{" "}
@@ -1446,7 +1563,7 @@ function ContactPage({
         <TaskModal c={c} close={() => setModal("")} act={act} />
       )}
       {modal.startsWith("task:") && <RecordModal kind="task" c={c} existing={tasks.find(t => t.id === Number(modal.split(":")[1]))} close={() => setModal("")} act={act} />}
-      {modal === "edit-contact" && <RecordModal kind="contact" c={c} close={() => setModal("")} act={act} />}
+      {modal === "edit-contact" && <RecordModal contacts={data.contacts} kind="contact" c={c} close={() => setModal("")} act={act} />}
       {modal === "email" && <EmailModal c={c} close={() => setModal("")} reload={reload} />}
       {modal.startsWith("appointment") && <RecordModal kind="appointment" c={c} existing={tasks.find(t => t.id === Number(modal.split(":")[1]))} close={() => setModal("")} act={act} />}
       {modal.startsWith("transaction") && <RecordModal kind="transaction" c={c} existing={opps.find(o => o.id === Number(modal.split(":")[1]))} close={() => setModal("")} act={act} />}
@@ -1455,6 +1572,48 @@ function ContactPage({
       )}
     </>
   );
+}
+
+function SmsComposer({ contactId, reload }: { contactId: number; reload: () => Promise<void> }) {
+  const [text, setText] = useState(""), [busy, setBusy] = useState(false), [error, setError] = useState(""), [image, setImage] = useState<File | null>(null);
+  const send = async () => {
+    if ((!text.trim() && !image) || !window.confirm(`Send this ${image ? "picture message" : "SMS"} now?`)) return;
+    setBusy(true); setError("");
+    try {
+      let mediaUrl = "";
+      if (image) {
+        let upload = image;
+        if (image.type !== "image/gif") {
+          const bitmap = await createImageBitmap(image);
+          const canvas = document.createElement("canvas");
+          let scale = Math.min(1, 1280 / Math.max(bitmap.width,bitmap.height));
+          let blob: Blob | null = null;
+          for (let attempt=0; attempt<6; attempt++) {
+            canvas.width = Math.max(1,Math.round(bitmap.width*scale)); canvas.height = Math.max(1,Math.round(bitmap.height*scale));
+            canvas.getContext("2d")?.drawImage(bitmap,0,0,canvas.width,canvas.height);
+            blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve,"image/jpeg",Math.max(.55,.85-attempt*.06)));
+            if (blob && blob.size <= 550_000) break;
+            scale *= .75;
+          }
+          bitmap.close();
+          if (!blob) throw Error("Could not prepare this image.");
+          upload = new File([blob],"image.jpg",{type:"image/jpeg"});
+        }
+        if (upload.size > 550_000) throw Error("This GIF is too large. Choose an image under 550 KB.");
+        const form = new FormData(); form.append("image",upload);
+        const uploaded = await fetch("/api/telnyx/media",{method:"POST",body:form});
+        const media = await uploaded.json() as Rec;
+        if (!uploaded.ok) throw Error(media.error || "Could not upload image.");
+        mediaUrl = media.url;
+      }
+      const r = await fetch("/api/telnyx/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({contactId,text,mediaUrl,idempotencyKey:crypto.randomUUID()})});
+      const result = await r.json() as Rec;
+      if (!r.ok) throw Error(result.error || "Could not send SMS.");
+      setText(""); setImage(null); await reload();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not send SMS."); }
+    finally { setBusy(false); }
+  };
+  return <div className="sms-edit contact-sms-composer" id="contact-sms-composer"><label>Send a text or picture message<textarea aria-label="Write SMS" value={text} maxLength={1600} rows={5} onChange={e => setText(e.target.value)} /></label><div className="sms-compose-actions"><label>Attach image<input type="file" accept="image/jpeg,image/png,image/gif" onChange={e => setImage(e.target.files?.[0] || null)} /></label><button disabled={busy || (!text.trim() && !image)} onClick={send}>{busy ? "Sending…" : image ? "Send picture message" : "Send SMS"}</button></div>{image && <small>Attached: {image.name}</small>}{error && <p role="alert">{error}</p>}</div>;
 }
 
 function SmsIntelligence({ contactId, channel = "sms", suggestions, reload }: { contactId: number; channel?: "sms" | "email"; suggestions: Rec[]; reload: () => Promise<void> }) {
@@ -1565,7 +1724,7 @@ function VoiceMemoRecord({ item, suggestions, reload }: { item: Rec; suggestions
     } finally { setBusy(false); }
   };
   const retryTranscription = async () => { setBusy(true); setRetryError(""); const response = await fetch(`/api/voice-memos/${item.id}/transcribe`, { method: "POST" }); if (!response.ok) setRetryError(((await response.json()) as Rec).error || "Transcription failed."); await reload(); setBusy(false); };
-  return <article className={`timeline-record call-record voice-memo-record ${open ? "open" : ""}`}>
+  return <article id={`communication-${item.id}`} className={`timeline-record call-record voice-memo-record ${open ? "open" : ""}`}>
     <span className="timeline-type-icon"><Mic /></span><div>
       <button className="call-summary-row" onClick={() => setOpen(!open)} aria-expanded={open}><span><b>{item.subject || "Voice Memo"}</b><small>{item.interaction_type || "In-person follow-up / Voice Memo"}</small></span><span><time>{whenDetailed(item.occurred_at)}</time><small>{duration(item.duration_seconds)} · {item.author_name || "Brad Claus"}</small></span><span className={item.transcription_status === "Transcript ready" ? "recording-ready" : "recording-pending"}>{item.transcription_status || "Processing"}</span><ChevronRight /></button>
       {open && <div className="call-detail"><audio controls preload="none" src={`/api/voice-memos/${item.id}/audio`}>Your browser cannot play this recording.</audio><div className="call-tabs">{["Summary","Transcript","Intelligence"].map((name) => <button className={tab === name ? "active" : ""} key={name} onClick={() => setTab(name)}>{name}</button>)}</div>
@@ -1578,13 +1737,18 @@ function VoiceMemoRecord({ item, suggestions, reload }: { item: Rec; suggestions
 }
 
 function TimelineRecord({ c, item, act }: { c: Rec; item: Rec; act: (p: Rec) => Promise<boolean> }) {
+  const [draftBusy, setDraftBusy] = useState(false), [draftText, setDraftText] = useState(""), [draftError, setDraftError] = useState("");
+  const [draftId, setDraftId] = useState<number | null>(null);
+  const [editingNote, setEditingNote] = useState(false), [noteBody, setNoteBody] = useState(""), [noteBusy, setNoteBusy] = useState(false), [noteError, setNoteError] = useState("");
   const type = String(item.timelineType), lower = type.toLowerCase();
   const isText = lower.includes("text") || lower.includes("sms");
+  const isContactNote = String(item.timelineId).startsWith("note-");
   const direction = String(item.direction || "").toLowerCase();
   let participants: Rec = {};
   if (typeof item.participants === "string") {
     try { participants = JSON.parse(item.participants); } catch { /* Older records may not have structured participants. */ }
   }
+  const images = isText && Array.isArray(participants.media) ? participants.media.filter((media: Rec) => typeof media.url === "string" && /^\/api\/telnyx\/media\/[0-9a-f]{64}$/.test(new URL(media.url,"https://claus-crm.bclaus.chatgpt.site").pathname) && new URL(media.url,"https://claus-crm.bclaus.chatgpt.site").origin === "https://claus-crm.bclaus.chatgpt.site") : [];
   const icon = lower.includes("text") || lower.includes("sms") ? <MessageSquare />
     : lower.includes("email") ? <Mail />
       : lower.includes("task") || lower.includes("appointment") ? <CheckSquare />
@@ -1597,16 +1761,53 @@ function TimelineRecord({ c, item, act }: { c: Rec; item: Rec; act: (p: Rec) => 
       : direction === "outbound" || direction === "outgoing" ? `Brad Claus → ${contactName}` : "Sender and recipient unknown";
   const directionLabel = direction === "inbound" || direction === "incoming" ? "Inbound"
     : direction === "outbound" || direction === "outgoing" ? "Outbound" : "Direction unknown";
-  return <article className="timeline-record">
+  const suggest = async (regenerate = false) => {
+    setDraftBusy(true); setDraftError("");
+    try {
+      const response = await fetch("/api/claus-ai/draft", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ communicationId: Number(item.id), regenerate }) });
+      const result = await response.json() as Rec;
+      if (!response.ok) throw Error(result.error || "Could not suggest a response.");
+      setDraftText(result.draft.generated_draft);
+      setDraftId(Number(result.draft.id));
+    } catch (cause) { setDraftError(cause instanceof Error ? cause.message : "Could not suggest a response."); }
+    finally { setDraftBusy(false); }
+  };
+  const sendDraft = async () => {
+    if (!draftText.trim() || !window.confirm("Send this SMS to the contact now?")) return;
+    setDraftBusy(true); setDraftError("");
+    try {
+      const response = await fetch("/api/telnyx/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({contactId:Number(c.id),text:draftText,idempotencyKey:crypto.randomUUID()})});
+      const result = await response.json() as Rec;
+      if (!response.ok) throw Error(result.error || "Could not send SMS.");
+      if (draftId) await fetch("/api/claus-ai",{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:draftId,status:"Edited",finalVersion:draftText})});
+      setDraftText(""); setDraftId(null);
+      window.location.reload();
+    } catch (cause) { setDraftError(cause instanceof Error ? cause.message : "Could not send SMS."); }
+    finally { setDraftBusy(false); }
+  };
+  return <article id={isText||lower.includes("email") ? `communication-${item.id}` : undefined} className="timeline-record">
     <span className="timeline-type-icon">{icon}</span>
     <div>
       <div className="timeline-record-head"><b>{type}</b>{!isText && <time>{whenDetailed(item.timelineDate)}</time>}</div>
       {isText && <div className="sms-meta"><time>{whenDetailed(item.timelineDate)}</time><span>{directionLabel}</span><span>{route}</span></div>}
+      {isText && direction === "outbound" && <div className="sms-meta"><span>Delivery: {item.status || "Pending"}</span>{item.subject && <span>{item.subject}</span>}{String(item.status).toLowerCase().includes("fail") && participants.telnyx_message_id && <button type="button" onClick={async () => { const response = await fetch(`/api/telnyx/messages?messageId=${encodeURIComponent(participants.telnyx_message_id)}`); const result = await response.json() as Rec; window.alert(response.ok ? `Delivery: ${result.status}${result.reason ? `\nReason: ${result.reason}` : "\nTelnyx did not return a failure reason."}` : result.error || "Could not retrieve delivery details."); }}>Why failed?</button>}</div>}
       {lower.includes("email") && <p className="timeline-route">{route}</p>}
       {lower.includes("email") && item.subject && <h3>{item.subject}</h3>}
       {lower.includes("email") && Array.isArray(participants.attachments) && participants.attachments.length > 0 && <div className="sms-meta">{participants.attachments.map((file: Rec, index: number) => <span key={index}>Attachment: {file.name} ({file.content_type || "file"})</span>)}</div>}
-      {lower.includes("task") || lower.includes("appointment") ? <p>{item.title} · {item.due_date || "Date not set"} · {item.due_time || "Time not set"}</p> : <p>{item.body || item.message_transcript || item.detail || item.title || (isText && participants.body_missing ? "No visible message body" : item.original_imported_text || "Activity recorded")}</p>}
+      {editingNote ? <form className="sms-edit" onSubmit={async e => {
+        e.preventDefault(); setNoteBusy(true); setNoteError("");
+        try {
+          if (await act({action:"editNote",id:item.id,contactId:c.id,body:noteBody})) setEditingNote(false);
+          else setNoteError("Could not save this note. Please try again.");
+        } finally { setNoteBusy(false); }
+      }}><label>Edit note<textarea aria-label="Edit note" required autoFocus maxLength={20000} rows={6} value={noteBody} onChange={e => setNoteBody(e.target.value)} /></label><button type="submit" disabled={noteBusy || !noteBody.trim()}>{noteBusy ? "Saving…" : "Save changes"}</button><button type="button" disabled={noteBusy} onClick={() => setEditingNote(false)}>Cancel</button>{noteError && <p role="alert" className="error">{noteError}</p>}</form>
+      : lower.includes("task") || lower.includes("appointment") ? <p>{item.title} · {item.due_date || "Date not set"} · {item.due_time || "Time not set"}</p> : <p>{item.body || item.message_transcript || item.detail || item.title || (isText && participants.body_missing ? "No visible message body" : item.original_imported_text || "Activity recorded")}</p>}
+      {images.length > 0 && <div className="sms-images">{images.map((media: Rec,index: number) => <a key={index} href={media.url} target="_blank" rel="noreferrer"><img src={media.url} alt="Text message image" loading="lazy" /></a>)}</div>}
+      {isContactNote && !editingNote && <button type="button" onClick={() => {setNoteBody(String(item.body || ""));setNoteError("");setEditingNote(true);}}>Edit note</button>}
       {item.imported === 1 && <span className="imported-label">Imported from {item.source_system || "FUB"}</span>}
+      {(isText || lower.includes("email")) && direction === "inbound" && !!item.message_transcript && !draftText && <button type="button" disabled={draftBusy} onClick={() => suggest()}>{draftBusy ? "Drafting…" : "Suggest response"}</button>}
+      {draftText && <div className="sms-edit"><label>Suggested response (review before sending)<textarea aria-label="Edit suggested SMS" value={draftText} onChange={e => setDraftText(e.target.value)} /></label>{isText && <button disabled={draftBusy} onClick={sendDraft}>Send SMS</button>}<button disabled={draftBusy} onClick={() => suggest(true)}>Regenerate</button><button disabled={draftBusy} onClick={() => { setDraftText(""); setDraftId(null); }}>Dismiss</button></div>}
+      {draftError && <p role="alert" className="error">{draftError}</p>}
     </div>
   </article>;
 }
@@ -1644,7 +1845,7 @@ function CallRecord({ c, item, suggestions, reload }: { c: Rec; item: Rec; sugge
     } catch (reason) { setActionError(reason instanceof Error ? reason.message : "Call analysis could not be refreshed."); }
     finally { setBusy(false); }
   };
-  return <article className={`timeline-record call-record ${open ? "open" : ""}`}>
+  return <article id={`communication-${item.id}`} className={`timeline-record call-record ${open ? "open" : ""}`}>
     <span className="timeline-type-icon"><Phone /></span>
     <div>
       <button className="call-summary-row" onClick={() => setOpen(!open)} aria-expanded={open}>
@@ -1769,19 +1970,28 @@ function EmailModal({c,close,reload}: {c:Rec;close:()=>void;reload:()=>Promise<v
       <label>To<select value={to} onChange={e=>setTo(e.target.value)}>{addresses.map(address=><option key={address}>{address}</option>)}</select></label>
       <label>Subject<input required maxLength={998} value={subject} onChange={e=>setSubject(e.target.value)}/></label>
       <label>Message<textarea required className="email-compose-body" value={body} onChange={e=>setBody(e.target.value)} placeholder="Write your email…"/></label>
+      <p className="email-footer-note">Your IABS, Consumer Protections Notice, and contact details are added automatically when you send.</p>
       <div className="form-actions"><button type="button" className="ghost" onClick={close} disabled={busy}>Cancel</button><button className="primary" type="submit" disabled={busy||!to}>{busy?"Sending…":"Send email"}</button></div>
     </form>}
     {error && <p className="call-feedback error" role="alert">{error}</p>}
   </Modal>;
 }
 
-function RecordModal({kind,c,existing,close,act}: {kind:"contact"|"appointment"|"transaction"|"task";c:Rec;existing?:Rec;close:()=>void;act:(p:Rec)=>Promise<boolean>}) {
+function ContactChoices({label,value,onChange,contacts,tags=false}:{label:string;value:string;onChange:(v:string)=>void;contacts:Rec[];tags?:boolean}) {
+ const [adding,setAdding]=useState(false),[newValue,setNewValue]=useState('');
+ const key=(v:string)=>v.trim().replace(/^#+/,'').replace(/[\s_-]+/g,' ').toLowerCase();
+ const choices=Array.from(new Map(contacts.flatMap(c=>tags?String(c.tags||'').split(','):[String(c.lead_source||'')]).map(v=>v.trim()).filter(Boolean).map(v=>[key(v),v])).values()).sort((a,b)=>a.localeCompare(b));
+ const selected=tags?value.split(',').map(v=>v.trim()).filter(Boolean):[];
+ const add=(v:string)=>{const canonical=choices.find(x=>key(x)===key(v))||v.trim();if(!canonical)return;if(tags){if(!selected.some(x=>key(x)===key(canonical)))onChange([...selected,canonical].join(','));}else onChange(canonical);};
+ return <div className="contact-choice"><label>{label}<select value={tags?'':value||''} onChange={e=>{if(e.target.value==='__new__'){setAdding(true);return;}if(tags)add(e.target.value);else onChange(e.target.value);}}><option value="">{tags?'Choose a tag':'Choose lead source'}</option>{!tags&&value&&!choices.includes(value)&&<option>{value}</option>}{choices.filter(v=>!tags||!selected.some(x=>key(x)===key(v))).map(v=><option key={v}>{v}</option>)}<option value="__new__">Add new {tags?'tag':'lead source'}…</option></select></label>{tags&&<div className="choice-tags">{selected.map(v=><button type="button" key={v} aria-label={`Remove ${v}`} onClick={()=>onChange(selected.filter(x=>x!==v).join(','))}>{v} ×</button>)}</div>}{adding&&<div><input aria-label={`New ${label}`} value={newValue} onChange={e=>setNewValue(e.target.value)} placeholder={`New ${label.toLowerCase()}`}/><button type="button" disabled={!newValue.trim()} onClick={()=>{add(newValue);setNewValue('');setAdding(false);}}>Add</button><button type="button" onClick={()=>setAdding(false)}>Cancel</button></div>}</div>;
+}
+function RecordModal({kind,c,existing,close,act,contacts=[]}: {contacts?:Rec[];kind:"contact"|"appointment"|"transaction"|"task";c:Rec;existing?:Rec;close:()=>void;act:(p:Rec)=>Promise<boolean>}) {
   const details = (() => {try {return JSON.parse(existing?.details || "{}")} catch {return {}}})();
   const [f,setF] = useState<Rec>(kind === "contact" ? {...c,...splitContactAddress(c.address),originalAddress:c.address} : kind === "appointment" || kind === "task" ? {contactId:c.id,id:existing?.id,title:existing?.title||"",dueDate:existing?.due_date||today(),dueTime:existing?.due_time||"",status:existing?.status||"Scheduled",notes:existing?.notes||"",precision:existing?.due_time?"exact":"date only",...details} : {contactId:c.id,id:existing?.id,type:existing?.type||"Seller",stage:existing?.stage||"Opportunity",propertyAddress:existing?.property_address||"",notes:existing?.notes||"",...details});
   const [busy,setBusy] = useState(false);
   const field = (key:string,label:string,type="text",required=false) => <label key={key}>{label}<input type={type} required={required} value={f[key] ?? ""} onChange={e=>setF(prev=>({...prev,[key]:e.target.value,...(key.startsWith("address") ? {addressEdited:true} : {})}))}/></label>;
   const choice = (key:string,label:string,options:string[]) => <label key={key}>{label}<select value={f[key]||options[0]} onChange={e=>setF(prev=>({...prev,[key]:e.target.value,...(key.startsWith("address") ? {addressEdited:true} : {})}))}>{options.map(o=><option key={o}>{o}</option>)}</select></label>;
-  const contactFields = [field("first_name","First name","text",true),field("last_name","Last name","text",true),field("display_name","Display name"),field("phone","Primary phone","tel"),choice("phone_type","Phone type",["Mobile","Home","Work","Other"]),<label key="additional_phones">Additional phones (number | type, one per line)<textarea value={f.additional_phones||""} onChange={e=>setF(prev=>({...prev,additional_phones:e.target.value}))}/></label>,field("email","Primary email","email"),choice("email_type","Email type",["Personal","Work","Other"]),<label key="additional_emails">Additional emails (email | type, one per line)<textarea value={f.additional_emails||""} onChange={e=>setF(prev=>({...prev,additional_emails:e.target.value}))}/></label>,field("addressStreet","Contact address · street"),field("addressCity","City"),field("addressState","State"),field("addressZip","ZIP code"),field("addressCountry","Country (optional)"),field("property_address","Seller property address"),choice("relationship","Relationship",[...relationshipOptions]),choice("intent","Intent",[...intentOptions]),choice("stage","Stage",[...stageOptions]),field("lead_source","Lead source"),choice("temperature","Temperature",["Hot","Warm","Cool"]),field("tags","Tags (comma separated)"),field("birthday","Birthday","date"),field("spouse_name","Spouse / partner"),field("contextual_notes","Contact notes")];
+  const contactFields = [field("first_name","First name","text",true),field("last_name","Last name","text",true),field("display_name","Display name"),field("phone","Primary phone","tel"),choice("phone_type","Phone type",["Mobile","Home","Work","Other"]),<label key="additional_phones">Additional phones (number | type, one per line)<textarea value={f.additional_phones||""} onChange={e=>setF(prev=>({...prev,additional_phones:e.target.value}))}/></label>,field("email","Primary email","email"),choice("email_type","Email type",["Personal","Work","Other"]),<label key="additional_emails">Additional emails (email | type, one per line)<textarea value={f.additional_emails||""} onChange={e=>setF(prev=>({...prev,additional_emails:e.target.value}))}/></label>,field("addressStreet","Contact address · street"),field("addressCity","City"),field("addressState","State"),field("addressZip","ZIP code"),field("addressCountry","Country (optional)"),field("property_address","Seller property address"),choice("relationship","Relationship",[...relationshipOptions]),choice("intent","Intent",[...intentOptions]),choice("stage","Stage",[...stageOptions]),<ContactChoices key="lead_source" label="Lead source" contacts={contacts} value={f.lead_source||""} onChange={v=>setF(prev=>({...prev,lead_source:v}))}/>,choice("temperature","Temperature",["Hot","Warm","Cool"]),<ContactChoices key="tags" label="Tags" tags contacts={contacts} value={f.tags||""} onChange={v=>setF(prev=>({...prev,tags:v}))}/>,field("birthday","Birthday","date"),field("spouse_name","Spouse / partner"),field("contextual_notes","Contact notes")];
   const appointmentFields = [field("title","Title / purpose","text",true),field("dueDate","Date","date",true),choice("precision","Scheduling precision",["exact","date only","daypart","flexible"]),...(f.precision === "exact" ? [field("dueTime","Time","time"),field("endTime","End time (optional)","time")] : []),...(f.precision === "daypart" ? [choice("daypart","Daypart",["Morning","Afternoon","Evening"])] : []),field("location","Location"),field("propertyAddress","Property address"),field("reminder","Reminder"),choice("status","Status",["Scheduled","Completed","Cancelled","No-show"]),<label key="inviteContact"><input type="checkbox" checked={!!f.inviteContact} onChange={e=>setF(prev=>({...prev,inviteContact:e.target.checked}))}/> Invite contact by Outlook email</label>,<label key="commitment"><input type="checkbox" checked={!!f.commitment} onChange={e=>setF(prev=>({...prev,commitment:e.target.checked}))}/> Commitment</label>,field("notes","Notes")];
   const stages = f.type === "Buyer" ? ["Opportunity","Appointment Set","Showing","Offer Written","Offer Accepted","Under Contract - Option Period","Under Contract - Post-Option","Pending","Closed"] : ["Opportunity","Appointment Set","Listing Active","Listing - Price Reduced","Under Contract - Option Period","Under Contract - Post-Option","Pending","Closed"];
   const commonTransaction = [choice("type","Transaction type",["Seller","Buyer"]),field("propertyAddress","Property address"),choice("stage","Transaction stage",stages),field("assignedAgent","Assigned agent"),field("createdDate","Created date","date"),field("mlsNumber","MLS number"),field("bedrooms","Bedrooms","number"),field("bathrooms","Bathrooms","number"),field("squareFootage","Square footage","number"),field("closingDate","Closing date","date"),field("commission","Commission","number")];
@@ -1797,7 +2007,9 @@ function RecordModal({kind,c,existing,close,act}: {kind:"contact"|"appointment"|
 function ContactModal({
   close,
   act,
+  contacts,
 }: {
+  contacts: Rec[];
   close: () => void;
   act: (p: Rec) => Promise<boolean>;
 }) {
@@ -1861,10 +2073,8 @@ function ContactModal({
             </select>
           </label>
           <label>Stage<select onChange={(e) => set("stage", e.target.value)}>{Object.entries(stageGroups).map(([group, values]) => <optgroup key={group} label={group}>{values.map((value) => <option key={value}>{value}</option>)}</optgroup>)}</select></label>
-          <label>
-            Lead source
-            <input onChange={(e) => set("leadSource", e.target.value)} />
-          </label>
+          <ContactChoices label="Lead source" contacts={contacts} value={f.leadSource||""} onChange={v=>set("leadSource",v)}/>
+          <ContactChoices label="Tags" tags contacts={contacts} value={f.tags||""} onChange={v=>set("tags",v)}/>
           <label>
             Next follow-up
             <input

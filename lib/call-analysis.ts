@@ -1,3 +1,4 @@
+import { realEstateProposals } from "./real-estate-extraction";
 import { centralDate, resolveMemoDate } from "./voice-memo-extraction";
 import { addressSuggestion } from "./address-intelligence";
 
@@ -105,6 +106,7 @@ export function analyzePhoneCall(input: { transcript: string; contactName: strin
   const brad = "Brad Claus", baseDate = centralDate(new Date(occurredAt));
   const suggestions: CallSuggestion[] = [];
   for (const item of conversation.filter(x => x.speaker === contactName)) {
+    for(const p of realEstateProposals(item.text)){const prior=suggestions.findIndex(s=>s.fieldName===p.fieldName);if(prior>=0)suggestions.splice(prior,1);suggestions.push(p);}
     const address = addressSuggestion(item.text);
     if (address) suggestions.push(address);
   }
@@ -167,7 +169,7 @@ export function analyzePhoneCall(input: { transcript: string; contactName: strin
 export async function saveCallAnalysis(db: D1Database, communicationId: number, input: { transcript: string; contactName: string; occurredAt: string; recordingRole?: "brad" | "contact" | null }) {
   const analysis = analyzePhoneCall(input);
   await db.batch([
-    db.prepare("DELETE FROM communication_suggestions WHERE communication_id=? AND status='Suggested'").bind(communicationId),
+    db.prepare("UPDATE communication_suggestions SET status='Superseded' WHERE communication_id=? AND status='Suggested'").bind(communicationId),
     db.prepare("UPDATE communications SET message_transcript=?,participants=?,ai_summary=?,transcription_status='Transcript ready',analysis_status='Call intelligence v2' WHERE id=?")
       .bind(input.transcript, JSON.stringify(analysis.utterances), analysis.summary, communicationId),
   ]);

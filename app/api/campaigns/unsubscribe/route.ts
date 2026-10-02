@@ -1,0 +1,7 @@
+import { env } from 'cloudflare:workers';
+import { stopContact, verifyUnsubscribe } from '@/lib/campaign';
+export const dynamic='force-dynamic';
+const params=(request:Request)=>{const u=new URL(request.url);return {id:Number(u.searchParams.get('contact')),token:u.searchParams.get('token')||''};};
+async function valid(request:Request){const {id,token}=params(request);return Number.isSafeInteger(id)&&id>0&&await verifyUnsubscribe(id,token)?id:null;}
+export async function GET(request:Request){const id=await valid(request);return new Response(id?`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Unsubscribe</title></head><body style="font:18px system-ui;max-width:36rem;margin:3rem auto;padding:1rem"><h1>Stop follow-up emails?</h1><p>You can unsubscribe from Claus CRM campaign emails.</p><form method="post"><button style="font:inherit;padding:12px 18px">Unsubscribe</button></form></body></html>`:'This unsubscribe link is invalid.',{status:id?200:404,headers:{'content-type':'text/html;charset=utf-8','cache-control':'no-store'}});}
+export async function POST(request:Request){const id=await valid(request);if(!id)return new Response('Invalid link',{status:404});await env.DB.prepare('UPDATE contacts SET email_unsubscribed=1 WHERE id=?').bind(id).run();await stopContact(id,'Email unsubscribe');return new Response('You have been unsubscribed from Claus CRM follow-up emails.',{headers:{'content-type':'text/plain;charset=utf-8'}});}

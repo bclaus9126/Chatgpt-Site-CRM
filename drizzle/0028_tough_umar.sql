@@ -1,0 +1,1 @@
+ALTER TABLE `campaign_settings` ADD `scheduler_last_run_at` text;

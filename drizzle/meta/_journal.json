@@ -134,6 +134,111 @@
       "when": 1790291464390,
       "tag": "0018_marvelous_owl",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1790363661437,
+      "tag": "0019_thick_mesmero",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1790366414306,
+      "tag": "0020_salty_cerise",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1790619315284,
+      "tag": "0021_noisy_prodigy",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "6",
+      "when": 1790620167913,
+      "tag": "0022_sour_green_goblin",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1790634275996,
+      "tag": "0023_warm_the_enforcers",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1790639469763,
+      "tag": "0024_breezy_beast",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "6",
+      "when": 1790695503050,
+      "tag": "0025_foamy_multiple_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "6",
+      "when": 1790695681363,
+      "tag": "0026_acoustic_sentinels",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "6",
+      "when": 1790695936630,
+      "tag": "0027_robust_ken_ellis",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "6",
+      "when": 1790696132072,
+      "tag": "0028_tough_umar",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "6",
+      "when": 1790697686419,
+      "tag": "0029_watery_elektra",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "6",
+      "when": 1790700000000,
+      "tag": "0030_website_buyer_copy",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "6",
+      "when": 1790707446324,
+      "tag": "0031_supreme_sue_storm",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "6",
+      "when": 1790870591323,
+      "tag": "0032_bumpy_nighthawk",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "6",
+      "when": 1790871220234,
+      "tag": "0033_breezy_vin_gonzales",
+      "breakpoints": true
     }
   ]
 }
