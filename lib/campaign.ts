@@ -206,7 +206,7 @@ async function runOne(enrollment:Row) {
     try {
       const result=await fetch('https://api.telnyx.com/v2/messages',{method:'POST',headers:{Authorization:`Bearer ${apiKey}`,'content-type':'application/json'},body:JSON.stringify({from:BUSINESS_NUMBER,to:number,text:content})});
       const body=await result.json() as Row;
-      if(!result.ok||!body.data?.id) throw Error(`Telnyx ${result.status}`);
+      if(!result.ok||!body.data?.id) {console.error("Campaign SMS rejected",{sender:BUSINESS_NUMBER,recipient:number,messageId:body.data?.id||null,status:result.status,code:body.errors?.[0]?.code,source:"campaign"});throw Error(`Telnyx ${result.status}; sender ${BUSINESS_NUMBER}; code ${body.errors?.[0]?.code||"unknown"}; ${String(body.errors?.[0]?.title||"Rejected").slice(0,200)}`);}
       const providerId=String(body.data.id);
       await db().prepare("UPDATE campaign_executions SET status='provider_accepted',provider_id=?,final_content=?,executed_at=? WHERE id=?").bind(providerId,content,iso(),executionId).run();
       const saved=await db().prepare("INSERT INTO communications (contact_id,type,direction,occurred_at,message_transcript,status,source_system,source_record_id,external_provider_id,from_number,to_number,imported,author_name,participants) VALUES (?,'SMS','outbound',? ,?,'Sent','telnyx',?,?,?, ?,0,'Brad Claus',?) ON CONFLICT(external_provider_id) DO NOTHING").bind(contact.id,iso(),content,providerId,`telnyx-sms:${providerId}`,BUSINESS_NUMBER,number,JSON.stringify({campaign_id:campaign.id,enrollment_id:enrollment.id,step_id:step.id,template_id:template?.id,telnyx_message_id:providerId})).run();

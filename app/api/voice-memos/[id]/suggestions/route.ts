@@ -1,3 +1,4 @@
+import { validAppointmentTime, APPOINTMENT_HOURS_ERROR } from "@/lib/appointment-hours";
 import { applyReviewedRealEstate } from "@/lib/real-estate-review";
 import { authorizeCrmOwner } from "@/lib/crm-auth";
 import { env } from "cloudflare:workers";
@@ -20,6 +21,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   for (const suggestionId of ids) {
     const suggestion = await env.DB.prepare("SELECT * FROM communication_suggestions WHERE id=? AND communication_id=? AND status='Suggested'").bind(suggestionId, communicationId).first<Record<string, any>>();
     if (!suggestion) continue;
+    if (suggestion.category === "APPOINTMENT" && !validAppointmentTime(suggestion.due_time)) return Response.json({error:APPOINTMENT_HOURS_ERROR},{status:400});
     if (suggestion.category === "ADDRESS REVIEW" && (suggestion.needs_review || !suggestion.field_value)) continue;
     if (suggestion.category === "NOTE") {
       await env.DB.prepare("INSERT INTO notes (contact_id,body,source_system,source_record_id,created_at) VALUES (?,?,?,?,CURRENT_TIMESTAMP)").bind(memo.contact_id, suggestion.detail || suggestion.title, sourceSystem, String(communicationId)).run();

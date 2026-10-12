@@ -45,8 +45,8 @@ export async function POST(request: Request) {
   }); } catch { return Response.json({error:"Telnyx could not accept the message. Check delivery before retrying."},{status:503}); }
   const result = await response.json().catch(() => ({})) as Record<string,any>;
   if (!response.ok || !result.data?.id) {
-    console.error("Telnyx SMS send failed",{status:response.status,code:result.errors?.[0]?.code});
-    return Response.json({error:`Telnyx rejected the message (HTTP ${response.status}).`},{status:502});
+    console.error("Telnyx SMS send failed",{sender:BUSINESS_NUMBER,recipient:to,messageId:result.data?.id||null,status:response.status,code:result.errors?.[0]?.code,source:"manual",message:String(result.errors?.[0]?.title||"Rejected").slice(0,200)});
+    return Response.json({error:`Telnyx rejected SMS from ${BUSINESS_NUMBER} (HTTP ${response.status}, code ${result.errors?.[0]?.code||"unknown"}): ${String(result.errors?.[0]?.title||"Rejected").slice(0,200)}.`},{status:502});
   }
   const p = result.data, occurredAt = p.sent_at || new Date().toISOString();
   await env.DB.prepare(`INSERT INTO communications (contact_id,type,direction,occurred_at,message_transcript,status,source_system,source_record_id,external_provider_id,from_number,to_number,imported,author_name,participants)

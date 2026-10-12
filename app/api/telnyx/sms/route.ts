@@ -1,6 +1,6 @@
 import { env, waitUntil } from "cloudflare:workers";
 import { verifyTelnyxSignature } from "@/app/api/telnyx/voice/route";
-import { normalizePhone, BUSINESS_NUMBER, BRAD_CELL } from "@/lib/telnyx-call-control";
+import { normalizePhone, BUSINESS_NUMBER, BRAD_CELL, isBusinessNumber } from "@/lib/telnyx-call-control";
 import { analyzeSmsConversation } from "@/lib/sms-analysis";
 import { createInboundDraft } from "@/lib/claus-ai/auto-draft";
 import { indexPending } from "@/lib/claus-ai/indexer";
@@ -37,7 +37,7 @@ async function handle(event: Row, origin: string) {
   if (!p.id || !["message.received","message.sent","message.finalized"].includes(type)) return;
   const id = String(p.id), from = number(p.from), to = recipient(p);
   // A call-context notice is internal: never attach it to a client or analyze it.
-  if (from === BUSINESS_NUMBER && to === BRAD_CELL) return;
+  if (isBusinessNumber(from) && to === normalizePhone(BRAD_CELL)) return;
   if (type === "message.finalized") {
     const statuses = Array.isArray(p.to) ? p.to.map((r: Row) => String(r.status || "")) : [];
     const status = statuses.includes("delivered") ? "Delivered" : statuses.some((s: string) => /fail/i.test(s)) ? "Failed" : String(p.status || "Finalized").slice(0,80);
@@ -49,7 +49,7 @@ async function handle(event: Row, origin: string) {
   const hasMedia = Array.isArray(p.media) && p.media.length > 0;
   if ((!p.text || !String(p.text).trim()) && !hasMedia) return;
   const inbound = type === "message.received", phone = inbound ? from : to;
-  if (!phone || !from || !to || (inbound && to !== BUSINESS_NUMBER)) return;
+  if (!phone || !from || !to || (inbound && !isBusinessNumber(to))) return;
   const contact = await matchingContact(phone);
   const media = inbound ? await archiveInboundImages(p.media,origin) : [];
   const contactName = contact ? `${contact.first_name} ${contact.last_name}`.trim() : phone;

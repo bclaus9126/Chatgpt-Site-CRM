@@ -2546,3 +2546,57 @@ body .timeline-filters button.active {
 .transactions-page button:hover,.estate-popup button:hover,.transactions-page summary:hover{background:#24482e}.transactions-page button:disabled,.estate-popup button:disabled{opacity:.55;cursor:wait}.transactions-page button.primary{background:#bcff32;color:#15231a}.transactions-page summary{list-style:none}.transactions-page summary::before{content:'+'}.transactions-page details[open]>summary::before{content:'−'}.transactions-page summary::-webkit-details-marker{display:none}.estate-status{display:flex;flex-direction:column;gap:8px;margin:16px 0}.estate-status select{min-height:44px;font-size:16px;width:100%;border:1px solid #72b986;border-radius:8px;padding:10px;background:#173120;color:white}
 
 .estate-popup .campaign-modal{padding:24px;max-height:90dvh;margin:0}.estate-popup .campaign-modal input,.estate-popup .campaign-modal select,.estate-popup .campaign-modal textarea{font-size:16px;width:100%}.estate-popup .campaign-modal .campaign-actions{position:sticky;bottom:0;background:#15231a;padding:12px 0}
+
+.email-attachments{border:2px dashed #72b986;border-radius:12px;padding:20px;margin:18px 0;background:#13251a;text-align:center}.email-attachments.dragging{background:#24482e;border-color:#bcff32}.email-attachments button{min-height:44px;padding:10px 16px;border:1px solid #72b986;border-radius:8px;background:#173120;color:white}.email-attachments small{font-size:14px}.email-attachment-file{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px;text-align:left}.email-attachment-file span{overflow-wrap:anywhere;min-width:0}.email-attachments input[hidden]{display:none!important}
+
+/* Settings actions must remain visible even without a component-specific class. */
+.settings-layout button,
+.mobile-notifications .notification-help > summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+  max-width: 100%;
+  margin: 6px 8px 6px 0;
+  padding: 10px 16px;
+  border: 1px solid #88c77b;
+  border-radius: 8px;
+  background: #225734;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.4;
+  text-decoration: none;
+  white-space: normal;
+  cursor: pointer;
+}
+.settings-layout button:hover:not(:disabled),
+.mobile-notifications .notification-help > summary:hover { background: #316e43; }
+.settings-layout button:focus-visible,
+.mobile-notifications .notification-help > summary:focus-visible { outline: 3px solid #bcff32; outline-offset: 3px; }
+.settings-layout button:disabled { opacity: .5; cursor: not-allowed; }
+.settings-layout .settings-nav button.active { background: #316e43; border-color: #bcff32; }
+.mobile-notifications .notification-option { display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 10px 12px; border: 1px solid #477856; border-radius: 8px; background: #173120; cursor: pointer; }
+.mobile-notifications .notification-option input { flex-shrink: 0; accent-color: #bcff32; }
+.mobile-notifications .notification-help > summary { list-style: none; }
+.mobile-notifications .notification-help > summary::-webkit-details-marker { display: none; }
+.mobile-notifications .notification-help ol { padding-left: 24px; line-height: 1.6; }
+.mobile-notifications .notification-help li { margin: 10px 0; }
+@media (max-width: 600px) {
+  .mobile-notifications > button,
+  .mobile-notifications .notification-help > summary { display: flex; width: 100%; margin: 10px 0; }
+}
+
+.mobile-contact-search { display: none; }
+@media (max-width: 900px) {
+  .mobile-contact-search { display: flex; gap: 10px; align-items: center; width: 100%; margin-bottom: 16px; }
+  .mobile-contact-search .search { display: flex; flex: 1; width: auto; min-width: 0; min-height: 48px; border: 1px solid #88c77b; background: #173120; border-radius: 9px; padding: 10px 12px; }
+  .mobile-contact-search input { min-width: 0; width: 100%; font-size: 16px; }
+  .mobile-contact-search button { min-height: 48px; padding: 10px 14px; border: 1px solid #88c77b; border-radius: 8px; background: #225734; color: #fff; font-size: 16px; font-weight: 700; }
+  .mobile-contact-search button:focus-visible { outline: 3px solid #bcff32; outline-offset: 2px; }
+}
+
+/* Task notes use the same saved task on Contacts and Today. */
+.task-card-notes { display: block; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; font-size: 14px; margin-top: 4px; }
+.sidebar-task-copy .task-card-notes { color: #cfdbd2; }

@@ -1,3 +1,4 @@
+import { validAppointmentTime, APPOINTMENT_HOURS_ERROR } from "@/lib/appointment-hours";
 import { authorizeCrmOwner } from "@/lib/crm-auth";
 import { env, waitUntil } from "cloudflare:workers";
 import { indexPending } from "@/lib/claus-ai/indexer";
@@ -140,7 +141,8 @@ export async function POST(req: Request) {
     }
     if (b.action === "saveAppointment" || b.action === "saveTask") {
       if (!Number.isInteger(b.contactId) || !String(b.title || "").trim()) return NextResponse.json({error:"Choose a contact and title."},{status:400});
-      const appointment = b.action === "saveAppointment";
+      const appointment = b.action === "saveAppointment" || b.type === "Appointment";
+      if (appointment && (!validAppointmentTime(b.dueTime) || !validAppointmentTime(b.endTime))) return NextResponse.json({error:APPOINTMENT_HOURS_ERROR},{status:400});
       if (appointment && !/^\d{4}-\d{2}-\d{2}$/.test(String(b.dueDate || ""))) return NextResponse.json({error:"Choose a date."},{status:400});
       const details = JSON.stringify({precision:b.precision || (b.dueTime ? "exact" : "date only"),endTime:b.endTime || null,daypart:b.daypart || null,location:b.location || null,propertyAddress:b.propertyAddress || null,reminder:b.reminder || null,commitment:!!b.commitment,inviteContact:!!b.inviteContact});
       if (appointment && b.precision === "exact" && (!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(b.dueTime||"")) || b.endTime && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(b.endTime)))) return NextResponse.json({error:"Enter a valid start and end time."},{status:400});
@@ -189,8 +191,9 @@ export async function POST(req: Request) {
     }
     if (b.action === "rescheduleTask") {
       if (!Number.isInteger(b.id) || !/^\d{4}-\d{2}-\d{2}$/.test(String(b.dueDate || ""))) return NextResponse.json({error:"Invalid task date"},{status:400});
-      const existing = await db.prepare("SELECT type FROM tasks WHERE id=?").bind(b.id).first<{type:string}>();
+      const existing = await db.prepare("SELECT type,due_time FROM tasks WHERE id=?").bind(b.id).first<{type:string;due_time:string|null}>();
       if (!existing) return NextResponse.json({error:"Task not found"},{status:404});
+      if (existing.type === "Appointment" && !validAppointmentTime(existing.due_time)) return NextResponse.json({error:APPOINTMENT_HOURS_ERROR},{status:400});
       await db.prepare("UPDATE tasks SET due_date=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(b.dueDate,b.id).run();
       if (existing.type === "Appointment") await syncAppointment(b.id);
     }
@@ -224,6 +227,7 @@ export async function POST(req: Request) {
         .bind(body,id,contactId).run();
       waitUntil(indexPending(db,1,false,`note:${id}`).catch(()=>console.error("Note indexing deferred")));
     }
+    if (b.action === "addTask" && b.type === "Appointment" && !validAppointmentTime(b.dueTime)) return NextResponse.json({error:APPOINTMENT_HOURS_ERROR},{status:400});
     if (b.action === "addTask")
       await db
         .prepare(

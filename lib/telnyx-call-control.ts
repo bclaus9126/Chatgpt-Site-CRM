@@ -1,7 +1,10 @@
 import { env } from "cloudflare:workers";
 
 export const BRAD_CELL = String((env as unknown as Record<string, string>).BRAD_CELL || "");
-export const BUSINESS_NUMBER = String((env as unknown as Record<string, string>).TELNYX_BUSINESS_NUMBER || "");
+const phoneSettings=env as unknown as Record<string,string>;
+export const BUSINESS_NUMBER = normalizePhone(phoneSettings.PRIMARY_BUSINESS_PHONE || phoneSettings.TELNYX_BUSINESS_NUMBER) || "";
+export const SECONDARY_BUSINESS_NUMBERS = String(phoneSettings.SECONDARY_BUSINESS_PHONES||"").split(',').map(normalizePhone).filter((v):v is string=>!!v&&v!==BUSINESS_NUMBER);
+export const isBusinessNumber=(value:unknown)=>{const n=normalizePhone(value);return !!n&&(n===BUSINESS_NUMBER||SECONDARY_BUSINESS_NUMBERS.includes(n));};
 export const VOICE_CONNECTION_ID = "3053942566882903353";
 
 export type CallClientState = {
@@ -106,6 +109,7 @@ export async function bridgeCalls(input: {
   callControlId: string;
   targetCallControlId: string;
   commandId: string;
+  playRingtone?: boolean;
 }) {
   const apiKey = (env as unknown as { TELNYX_API_KEY?: string }).TELNYX_API_KEY;
   if (!apiKey) throw new Error("TELNYX_API_KEY is not configured");
@@ -120,6 +124,7 @@ export async function bridgeCalls(input: {
       body: JSON.stringify({
         call_control_id: input.targetCallControlId,
         command_id: input.commandId,
+        ...(input.playRingtone ? { play_ringtone: true, ringtone: "us" } : {}),
       }),
     },
   );

@@ -1,3 +1,4 @@
+import { validAppointmentTime, APPOINTMENT_HOURS_ERROR } from "@/lib/appointment-hours";
 import { authorizeCrmOwner } from "@/lib/crm-auth";
 import { env } from "cloudflare:workers";
 
@@ -10,6 +11,7 @@ export async function PATCH(request: Request) {
   if (!Number.isSafeInteger(id) || id < 1 || !title || title.length > 250 || detail.length > 5000 || fieldValue.length > 1000 || (dueDate && !/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) || (dueTime && !/^([01]\d|2[0-3]):[0-5]\d$/.test(dueTime))) return Response.json({error:"Check the edited fields."},{status:400});
   const current = await env.DB.prepare("SELECT s.* FROM communication_suggestions s JOIN communications c ON c.id=s.communication_id WHERE s.id=? AND s.status='Suggested' AND c.contact_id IS NOT NULL").bind(id).first<Record<string,any>>();
   if (!current) return Response.json({error:"This recommendation is no longer pending."},{status:409});
+  if (current.category === "APPOINTMENT" && !validAppointmentTime(dueTime)) return Response.json({error:APPOINTMENT_HOURS_ERROR},{status:400});
   const original = current.original_value || JSON.stringify({title:current.title,detail:current.detail,due_date:current.due_date,due_time:current.due_time,field_value:current.field_value});
   const needsReview = ["TASK","FOLLOW-UP","APPOINTMENT","RELATIONSHIP MOMENT"].includes(current.category) && !dueDate ? 1 : 0;
   await env.DB.prepare("UPDATE communication_suggestions SET title=?,detail=?,due_date=?,due_time=?,field_value=?,needs_review=?,original_value=?,edited_by='Brad Claus',edited_at=CURRENT_TIMESTAMP WHERE id=? AND status='Suggested'")

@@ -13,7 +13,21 @@ export async function POST(request: Request) {
   if (!row || row.owner_user_id !== user.userId) return Response.json({ error: "Connect your Microsoft 365 mailbox first." }, { status: 403 });
   if (!row.send_enabled) return Response.json({ error: "Approve the Mail.Send permission in Microsoft 365 before sending." }, { status: 403 });
   let data: { contactId?: number; to?: string; subject?: string; body?: string };
-  try { data = await request.json(); } catch { return Response.json({ error: "Invalid email" }, { status: 400 }); }
+  let attachments: {"@odata.type":string;name:string;contentType:string;contentBytes:string}[]=[];
+  try {
+    if(Number(request.headers.get("content-length")||0)>4_000_000)return Response.json({error:"Email attachments must total 2.5 MB or less."},{status:413});
+    if(request.headers.get("content-type")?.includes("multipart/form-data")){
+      const form=await request.formData();data={contactId:Number(form.get("contactId")),to:String(form.get("to")||""),subject:String(form.get("subject")||""),body:String(form.get("body")||"")};
+      const files=form.getAll("attachments");if(files.length>10)return Response.json({error:"Attach up to 10 files."},{status:400});
+      let total=0;
+      for(const file of files){
+        if(typeof file==='string'||!file.name||file.name.length>255||/[\r\n\0]/.test(file.name))return Response.json({error:"Invalid attachment."},{status:400});
+        total+=file.size;if(total>2_500_000)return Response.json({error:"Email attachments must total 2.5 MB or less."},{status:413});
+        const bytes=new Uint8Array(await file.arrayBuffer());let binary='';for(let i=0;i<bytes.length;i+=8192)binary+=String.fromCharCode(...bytes.subarray(i,i+8192));
+        attachments.push({"@odata.type":"#microsoft.graph.fileAttachment",name:file.name,contentType:file.type||"application/octet-stream",contentBytes:btoa(binary)});
+      }
+    }else data=await request.json();
+  } catch { return Response.json({ error: "Invalid email or attachment" }, { status: 400 }); }
   const contactId = Number(data.contactId);
   const to = String(data.to || "").trim().toLowerCase();
   const subject = String(data.subject || "").trim();
@@ -27,7 +41,7 @@ export async function POST(request: Request) {
   try {
     const token = await accessToken(row);
     const email=withEmailFooter(body);
-    const result = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", { method: "POST", headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ message: { subject, body: { contentType: "HTML", content: email.html }, toRecipients: [{ emailAddress: { address: to } }] }, saveToSentItems: true }) });
+    const result = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", { method: "POST", headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ message: { subject, body: { contentType: "HTML", content: email.html }, toRecipients: [{ emailAddress: { address: to } }], attachments }, saveToSentItems: true }) });
     if (!result.ok) {
       if (result.status === 403) return Response.json({ error: "Microsoft has not granted permission to send mail. Reconnect Microsoft 365 and approve Mail.Send." }, { status: 403 });
       return Response.json({ error: `Microsoft could not accept the email (${result.status}). It was not added to the CRM.` }, { status: 502 });

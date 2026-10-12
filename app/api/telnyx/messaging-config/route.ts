@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { authorizeCrmOwner } from "@/lib/crm-auth";
-import { BUSINESS_NUMBER } from "@/lib/telnyx-call-control";
+import { BUSINESS_NUMBER, SECONDARY_BUSINESS_NUMBERS } from "@/lib/telnyx-call-control";
 
 const webhook = "https://claus-crm.bclaus.chatgpt.site/api/telnyx/sms";
 type Data = Record<string, any>;
@@ -22,7 +22,7 @@ async function status() {
   const profiles = await telnyx("messaging_profiles?page%5Bsize%5D=100");
   const campaign = await telnyx(`10dlc/phone_number_campaigns/${encodeURIComponent(BUSINESS_NUMBER)}`).catch(() => null);
   return {
-    businessNumber: BUSINESS_NUMBER, profileId: assigned, profileName: profile?.name || null,
+    businessNumber: BUSINESS_NUMBER, secondaryBusinessNumbers: SECONDARY_BUSINESS_NUMBERS, profileId: assigned, profileName: profile?.name || null,
     webhookUrl: profile?.webhook_url || null, expectedWebhookUrl: webhook,
     campaignId: campaign?.campaignId || null, campaignAssignment: campaign?.assignmentStatus || null,
     messagingProduct: number?.messaging_product || null,

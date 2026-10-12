@@ -1,3 +1,4 @@
+import { resolveAppointmentTime, validAppointmentTime } from "./appointment-hours";
 import { realEstateProposals } from "./real-estate-extraction";
 import { centralDate, resolveMemoDate } from "./voice-memo-extraction";
 import type { CallSuggestion } from "./call-analysis";
@@ -49,13 +50,15 @@ export function analyzeSmsConversation(messages: SmsMessage[], contactName: stri
     if (/\b(?:house|home|property)\b.*\bready\b/i.test(text) && date.dueDate) take("PROPERTY TIMELINE", `Property expected ready ${date.dueDate}`, "property_ready_date", date.dueDate);
     if (/\blease\b.*\bend/i.test(text)) take("BUYER INTELLIGENCE", "Lease end affects timeline", "lease_timeline", text.slice(0, 240));
     if (/\b(?:meet|appointment|showing|get together)\b/i.test(text) && date.dueDate) {
-      appointment = { proposal: message, date, time: date.dueTime };
+      const clock = resolveAppointmentTime(text);
+      date.needsReview = date.needsReview || clock.needsReview;
+      appointment = { proposal: message, date, time: clock.time || date.dueTime };
     } else if (appointment && /\b(?:better|instead|works|let's do|okay)\b/i.test(text)) {
       if (date.dueDate && /\b(?:better|instead|let's do|works)\b/i.test(text)) appointment.date = date;
-      const explicit = text.match(/\b(1[0-2]|[1-9])(?::([0-5]\d))?\s*(a\.?m\.?|p\.?m\.?)?\b/i);
-      if (explicit && /\b(?:better|instead|works|let's do|okay)\b/i.test(text)) {
-        const hour = Number(explicit[1]) % 12 + (/p/i.test(explicit[3] || "") ? 12 : 0);
-        appointment.time = `${String(hour).padStart(2,"0")}:${explicit[2] || "00"}`;
+      const clock = resolveAppointmentTime(text);
+      if (clock.time || clock.needsReview) {
+        appointment.time = clock.time;
+        appointment.date.needsReview = clock.needsReview;
         appointment.confirmation = message;
       } else if (/\b(?:perfect|works|agreed|confirmed)\b/i.test(text)) appointment.confirmation = message;
     }
@@ -66,6 +69,6 @@ export function analyzeSmsConversation(messages: SmsMessage[], contactName: stri
     }
     if (!fromBrad && recent(message) && /\bcheck back\b/i.test(text)) actions.push({ category: "FOLLOW-UP", title: `Follow up with ${contactName}`, detail: text, dueDate: date.dueDate, sourceExcerpt: evidence(message), needsReview: !date.dueDate || date.needsReview, sourceMessageId: message.id });
   }
-  if (appointment?.confirmation && recent(appointment.proposal)) actions.push({ category: "APPOINTMENT", title: `Meet ${contactName}`, dueDate: appointment.date.dueDate, dueTime: appointment.time, daypart: appointment.date.daypart, schedulingPrecision: appointment.time ? "exact_datetime" : appointment.date.schedulingPrecision, commitment: true, sourceExcerpt: `${evidence(appointment.proposal)} / ${evidence(appointment.confirmation)}`, needsReview: appointment.date.needsReview, sourceMessageId: appointment.confirmation.id });
+  if (appointment?.confirmation && recent(appointment.proposal)) actions.push({ category: "APPOINTMENT", title: `Meet ${contactName}`, dueDate: appointment.date.dueDate, dueTime: appointment.time, daypart: appointment.date.daypart, schedulingPrecision: appointment.time ? "exact_datetime" : appointment.date.schedulingPrecision, commitment: true, sourceExcerpt: `${evidence(appointment.proposal)} / ${evidence(appointment.confirmation)}`, needsReview: appointment.date.needsReview || !validAppointmentTime(appointment.time), sourceMessageId: appointment.confirmation.id });
   return [...facts.values(), ...actions].slice(0, 20);
 }

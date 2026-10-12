@@ -249,7 +249,7 @@ export default function Home() {
           (c.phone || "")
         )
           .toLowerCase()
-          .includes(search.toLowerCase()),
+          .includes(search.trim().toLowerCase()) || (/^[+\d\s().-]+$/.test(search.trim()) && !!search.replace(/\D/g, "") && String(c.phone || "").replace(/\D/g, "").includes(search.replace(/\D/g, ""))),
       ),
     [data.contacts, search],
   );
@@ -380,7 +380,13 @@ export default function Home() {
               openReview={openReview}
             />
           ) : view === "Contacts" ? (
-            <Contacts contacts={filtered} open={setSelected} />
+            <>
+              <div className="mobile-contact-search">
+                <label className="search"><Search aria-hidden="true" /><input type="search" aria-label="Search contacts on mobile" placeholder="Search name, phone, or email…" value={search} onChange={e=>setSearch(e.target.value)} autoComplete="off" /></label>
+                {search && <button type="button" onClick={()=>setSearch("")}>Clear</button>}
+              </div>
+              <Contacts contacts={filtered} open={setSelected} />
+            </>
           ) : view === "Transactions" ? (
             <Transactions data={data} initialId={transactionId} clearInitial={()=>setTransactionId(null)} openContact={(id,anchor)=>{setSelected(data.contacts.find(c=>Number(c.id)===id)||null);setView("Contacts");if(anchor)setReviewSourceAnchor(anchor);}}/>
           ) : view === "Tasks" ? (
@@ -448,7 +454,7 @@ function TodayDashboard({ data, open, go, act, openReview }: { data: Data; open:
   const jump = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
   const schedule = (item: Rec) => { setEditing(item); setDraftDate(item.due_date?.slice(0,10) || day); };
   const contactActions = (c: Rec) => <span className="today-actions">{c.phone && <><a href={`tel:${c.phone}`}>Call</a><a href={`sms:${c.phone}`}>Text</a></>}{c.email && <a href={`mailto:${c.email}`}>Email</a>}<button onClick={() => open(c)}>Open contact</button></span>;
-  const taskRow = (t: Rec) => <div className="today-row" key={t.id}><div><strong>{t.title}</strong><span><button className="today-link" onClick={() => openContact(t.contact_id)}>{t.contact_name || name(contact(t.contact_id))}</button> · {when(t.due_date)}{t.due_time ? ` at ${t.due_time}` : " · Time not set"}</span>{t.notes && <small>{t.notes}</small>}{t.source_system && <small>Source: {t.source_system}</small>}</div><span className="today-actions"><button onClick={() => act({action:"completeTask",id:t.id})}>Complete</button><button onClick={() => schedule(t)}>Reschedule</button><button onClick={() => openContact(t.contact_id)}>Open contact</button></span></div>;
+  const taskRow = (t: Rec) => <div className="today-row" key={t.id}><div><strong>{t.title}</strong><span><button className="today-link" onClick={() => openContact(t.contact_id)}>{t.contact_name || name(contact(t.contact_id))}</button> · {when(t.due_date)}{t.due_time ? ` at ${t.due_time}` : " · Time not set"}</span>{t.notes?.trim() && <small className="task-card-notes">{t.notes}</small>}{t.source_system && <small>Source: {t.source_system}</small>}</div><span className="today-actions"><button onClick={() => act({action:"completeTask",id:t.id})}>Complete</button><button onClick={() => schedule(t)}>Reschedule</button><button onClick={() => openContact(t.contact_id)}>Open contact</button></span></div>;
   const section = (id: string, title: string, count: number, emptyText: string, rows: React.ReactNode) => <section className="today-section" id={id}><h3>{title} <span>{count}</span></h3>{count ? rows : <p className="today-empty">{emptyText}</p>}</section>;
   return <div className="today-board"><section className="today-intro"><span>{new Intl.DateTimeFormat("en-US", { timeZone:"America/Chicago", weekday:"long", month:"long", day:"numeric" }).format(now)}</span><h2>Good {Number(new Intl.DateTimeFormat("en-US",{timeZone:"America/Chicago",hour:"numeric",hourCycle:"h23"}).format(now)) < 12 ? "morning" : "afternoon"}, Brad.</h2><p>Here’s what needs your attention.</p><div className="today-counts">{[["Overdue follow-ups",overdueFollowups.length,"overdue-followups"],["Tasks due",tasks.length,"today-tasks"],["Appointments",appointments.length,"today-appointments"],["Recent inbound",inbound.length,"recent-inbound"],["Open promises",promises.length,"promises"]].map(([label,count,id]) => <button key={String(id)} onClick={() => jump(String(id))}><b>{count}</b> {label}</button>)}</div></section>
   {section("overdue-followups","Overdue Follow-Ups",overdueFollowups.length,"No overdue follow-ups.",overdueFollowups.map(c => <div className="today-row urgent" key={c.id}><div><button className="today-link" onClick={() => open(c)}><strong>{name(c)}</strong></button><span>{overdueDays(c.next_follow_up)} days overdue · {[c.relationship,c.intent,c.stage].filter(Boolean).join(" · ")}</span><small>Last contact: {when(c.last_meaningful_contact)}{c.recommended_next_action ? ` · ${c.recommended_next_action}` : ""}</small></div><span className="today-actions">{contactActions(c)}<button onClick={() => act({action:"completeFollowUp",contactId:c.id})}>Complete</button><button onClick={() => schedule({contact_id:c.id,followup:true,due_date:c.next_follow_up})}>Reschedule</button></span></div>))}
@@ -946,20 +952,33 @@ function CampaignSchedulerStatus() {
 }
 
 function MobileNotifications() {
-  const [state,setState] = useState<Rec | null>(null),[subscribed,setSubscribed] = useState(false),[message,setMessage] = useState(""),[busy,setBusy] = useState(false);
+  const [state,setState] = useState<Rec | null>(null),[subscribed,setSubscribed] = useState(false),[message,setMessage] = useState(""),[busy,setBusy] = useState(false),[permission,setPermission]=useState("default"),[workerReady,setWorkerReady]=useState(false);
   const supported = typeof window !== "undefined" && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
   const refresh = async () => {
     try {
       const r = await fetch("/api/push"); if (!r.ok) throw Error("Notification settings unavailable");
       setState(await r.json());
-      if (supported) { const reg = await navigator.serviceWorker.register("/sw.js"); setSubscribed(!!await reg.pushManager.getSubscription()); }
+      if (supported) {
+        setPermission(Notification.permission);
+        await navigator.serviceWorker.register("/sw.js");
+        const reg = await navigator.serviceWorker.ready; setWorkerReady(!!reg.active);
+        const sub = await reg.pushManager.getSubscription();
+        const status = await fetch("/api/push",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"device-status",endpoint:sub?.endpoint})});
+        if (!status.ok) throw Error("Could not verify device registration");
+        setSubscribed(!!sub && (await status.json()).subscribed);
+      }
     } catch(e) { setMessage(e instanceof Error ? e.message : "Notifications unavailable"); }
   };
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => {
+    refresh();
+    const focus=()=>refresh(); window.addEventListener("focus",focus);
+    return ()=>window.removeEventListener("focus",focus);
+  }, []);
   const request = async (action: "subscribe"|"unsubscribe") => {
     setBusy(true); setMessage("");
     try {
-      const reg = await navigator.serviceWorker.register("/sw.js");
+      await navigator.serviceWorker.register("/sw.js");
+      const reg = await navigator.serviceWorker.ready;
       let sub = await reg.pushManager.getSubscription();
       if (action === "subscribe") {
         if (Notification.permission !== "granted" && await Notification.requestPermission() !== "granted") throw Error("Notification permission is blocked. Enable it in your browser or phone settings, then try again.");
@@ -987,13 +1006,41 @@ function MobileNotifications() {
     try { const r=await fetch("/api/push",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"settings",settings})}); if (!r.ok) throw Error(); }
     catch {setMessage("Could not save notification preferences.");await refresh();}
   };
+  const sendTest = async () => {
+    setBusy(true);setMessage("");
+    try {
+      const r=await fetch("/api/push",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"test"})});
+      const result=await r.json();
+      if(!r.ok) throw Error(result.error||"Test notification failed");
+      setMessage(!result.attempted ? "No registered devices. Subscribe this device first." : `${result.accepted} accepted by push service; ${result.failed} failed.${result.errors?.length ? " Errors: "+result.errors.join(", ") : " Check your phone for Claus CRM Test."}`);
+      await refresh();
+    } catch(e) {setMessage(e instanceof Error ? e.message : "Test notification failed");}
+    finally {setBusy(false);}
+  };
   const settings = state?.settings || {};
+  const pushStatus = !supported ? "Unsupported" : permission !== "granted" ? "Permission required" : subscribed && state?.configuration?.ready ? "Enabled" : "Disabled";
   return <article className="panel mobile-notifications"><h2>Mobile Notifications</h2>
     <p>Get new inbound texts on subscribed phones and browsers. On iPhone, add Claus CRM to your Home Screen first, then open it from the icon to enable push.</p>
-    <p>Current device: {!supported ? "Push unavailable in this browser" : Notification.permission === "denied" ? "Permission blocked" : subscribed ? "Subscribed" : "Not subscribed"} · Active devices: {state?.activeDevices ?? "—"}</p>
-    {supported && <button type="button" disabled={busy || !state?.publicKey} onClick={() => request(subscribed ? "unsubscribe" : "subscribe")}>{busy ? "Working…" : subscribed ? "Disable on this device" : "Enable on this device"}</button>}
-    {state && !state.publicKey && <p>Push setup is incomplete on the server.</p>}
-    {[["inboundSms","Inbound SMS"],["unknownSms","Unknown numbers"],["preview","Show message preview"],["quietHours","Quiet hours"]].map(([key,label]) => <label className="notification-option" key={key}><input type="checkbox" checked={!!settings[key]} onChange={e=>update(key,e.target.checked)} /> {label}</label>)}
+    <details className="notification-help"><summary>Phone setup instructions</summary>
+      <ol>
+        <li>On iPhone (iOS 16.4 or later), open Claus CRM in Safari, tap Share, and choose Add to Home Screen. Then open Claus CRM from its Home Screen icon. On Android, open Claus CRM in Chrome.</li>
+        <li>Sign in with your owner account and open Settings → Mobile Notifications.</li>
+        <li>Tap Enable notifications and choose Allow. If permission is already granted, tap Subscribe this device.</li>
+        <li>Confirm Push notifications says Enabled and Current device says Subscribed. Registration applies to this device only.</li>
+        <li>Keep Inbound SMS ON. Choose whether message previews should appear on your lock screen.</li>
+        <li>Tap Send Test Notification and check your phone for “Claus CRM Test.”</li>
+      </ol>
+      <p>If permission is denied, allow Claus CRM notifications in your phone or browser settings, return here, and subscribe this device again.</p>
+    </details>
+    <p>Push notifications: {state ? pushStatus : "Checking…"}</p>
+    <p>Browser permission: {supported ? permission === "default" ? "Not requested" : permission : "Unsupported"}</p>
+    <p>Current device: {subscribed ? "Subscribed" : "Not subscribed"} · Active devices: {state?.activeDevices ?? "—"}</p>
+    <p>Background notification service: {workerReady ? "Ready on this device" : supported ? "Checking…" : "Unsupported"}</p>
+    {permission === "denied" && <p>Allow Claus CRM notifications in your phone or browser settings, then return here to subscribe.</p>}
+    {supported && <button type="button" disabled={busy || !state?.configuration?.ready} onClick={() => request(subscribed ? "unsubscribe" : "subscribe")}>{busy ? "Working…" : subscribed ? "Disable on this device" : permission === "granted" ? "Subscribe this device" : "Enable notifications"}</button>}
+    {state && !state.configuration?.ready && <p>Push setup needs attention: {state.configuration?.error}. {state.configuration?.missing?.join(", ")}</p>}
+    <button type="button" disabled={busy || !state?.configuration?.ready || !state?.activeDevices} onClick={sendTest}>Send Test Notification</button>
+    {[["inboundSms","Inbound SMS"],["unknownSms","Unknown numbers"],["preview","Show message preview"],["quietHours","Quiet hours"]].map(([key,label]) => <label className="notification-option" key={key}><input type="checkbox" checked={!!settings[key]} onChange={e=>update(key,e.target.checked)} /> {label}: {settings[key] ? "ON" : "OFF"}</label>)}
     {settings.quietHours && <div className="notification-times"><label>Start <input type="time" value={settings.quietStart} onChange={e=>update("quietStart",e.target.value)} /></label><label>End <input type="time" value={settings.quietEnd} onChange={e=>update("quietEnd",e.target.value)} /></label><small>America/Chicago</small></div>}
     {message && <p role="status">{message}</p>}
   </article>;
@@ -1006,7 +1053,7 @@ function TelnyxMessagingStatus() {
   const action = async (value: Rec) => { setBusy(true); setMessage(""); try { const r = await fetch("/api/telnyx/messaging-config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(value)}); const data = await r.json() as Rec; if (!r.ok) throw Error(String(data.error)); await refresh(); setMessage("Telnyx messaging settings saved."); } catch(e) { setMessage(e instanceof Error ? e.message : "Could not save settings"); } finally { setBusy(false); } };
   const enabled = state?.enabled ? JSON.parse(state.enabled).enabled !== false : true;
   return <div className="future" style={{display:"block"}}><strong>Telnyx messaging</strong>
-    {state && <><p>Business number: {state.businessNumber}</p><p>Profile: {state.profileName || "Unassigned"} {state.profileId ? `(${state.profileId})` : ""}</p><p>Campaign: {state.campaignId || "Not reported"} {state.campaignAssignment || ""}</p><p>Webhook: {state.webhookUrl || "Not connected"}</p>
+    {state && <><p>Primary business number: {state.businessNumber}</p><p>Secondary/backup number: {(state.secondaryBusinessNumbers||[]).join(", ")||"None configured"}</p><p>Profile: {state.profileName || "Unassigned"} {state.profileId ? `(${state.profileId})` : ""}</p><p>Campaign: {state.campaignId || "Not reported"} {state.campaignAssignment || ""}</p><p>Webhook: {state.webhookUrl || "Not connected"}</p>
       {!state.profileId && (!state.campaignAssignment || state.campaignAssignment === "ASSIGNED") && state.availableProfiles?.length === 1 && <button disabled={busy} onClick={() => action({action:"assign-profile"})}>Assign business number to Brad CRM</button>}
       {state.profileId && state.webhookUrl !== state.expectedWebhookUrl && <button disabled={busy} onClick={() => action({action:"connect-webhook"})}>Connect SMS webhook</button>}
       {!state.profileId && <p>{state.numberFound ? "The business number has no messaging profile assignment." : "The business number was not found in this Telnyx account’s messaging number list."}</p>}
@@ -1384,7 +1431,7 @@ function ContactPage({
                   </span>
                 ))}
               </span>
-              <ContactChoices label="Tags" tags contacts={data.contacts} value={c.tags||""} onChange={v=>saveTags(v.split(',').filter(Boolean))}/>
+              <ContactChoices label="Tags" tags showSelected={false} contacts={data.contacts} value={c.tags||""} onChange={v=>saveTags(v.split(',').filter(Boolean))}/>
             </div>
           </div>
         </div>
@@ -1519,7 +1566,7 @@ function ContactPage({
             {upcomingTasks.filter((task) => task.type !== "Appointment").slice(0, 5).map((task) => (
               <div className={`sidebar-task ${task.due_date < today() ? "overdue" : ""}`} key={task.id}>
                 <button className="task-check" aria-label={`Mark ${task.title} complete`} onClick={() => act({ action: "completeTask", id: task.id })}><CheckSquare /></button>
-                <span className="sidebar-task-copy"><b>{task.title}</b><span>{task.due_date < today() ? "Overdue · " : ""}{when(task.due_date)}</span></span><button onClick={() => setModal(`task:${task.id}`)}>Edit</button>
+                <span className="sidebar-task-copy"><b>{task.title}</b><span>{task.due_date < today() ? "Overdue · " : ""}{when(task.due_date)}</span>{task.notes?.trim() && <span className="task-card-notes">{task.notes}</span>}</span><button onClick={() => setModal(`task:${task.id}`)}>Edit</button>
               </div>
             ))}
             {upcomingTasks.filter((task) => task.type !== "Appointment").length === 0 && <p className="compact-empty">No open tasks.</p>}
@@ -1641,7 +1688,7 @@ function SmsIntelligence({ contactId, channel = "sms", suggestions, reload }: { 
   };
   return <section className="sms-intelligence"><div className="sms-intelligence-head"><div><b>AI Interpretation</b><p>Review proposed facts and actions from recent conversation context. {channel === "email" ? "Imported emails are analyzed only when you choose." : "Imported texts are analyzed only when you choose."}</p></div><button disabled={busy} onClick={run}>{busy ? "Working…" : "Analyze conversation"}</button></div>
     {error && <p role="alert">{error}</p>}
-    {pending.length > 0 && <div className="memo-suggestions">{pending.map((item) => <div className="sms-suggestion" key={item.id}><div><b>{item.category}{item.commitment ? " · PROMISED" : ""}</b><strong>{item.title}</strong><small>{item.due_date ? `${when(item.due_date)}${item.due_time ? ` at ${item.due_time}` : item.daypart ? ` · ${item.daypart}` : " · Time not set"}` : "No due date"}</small><small>Source: “{item.source_excerpt}”</small>{item.needs_review === 1 && <em>Review timing before accepting</em>}</div><div className="sms-suggestion-actions"><button disabled={busy || (item.needs_review === 1 && item.category === "ADDRESS REVIEW") || (!item.due_date && ["FOLLOW-UP", "APPOINTMENT"].includes(item.category))} onClick={() => decide([item])}>Accept</button><button disabled={busy} onClick={() => { setEditing(item.id); setDraft({ title: item.title, due_date: item.due_date || "", due_time: item.due_time || "", field_value: item.field_value || "" }); }}>Edit</button><button disabled={busy} onClick={() => decide([item], true)}>Dismiss</button></div>{editing === item.id && <div className="sms-edit"><label>Title<input value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} /></label><label>Date<input type="date" value={draft.due_date} onChange={(e) => setDraft({ ...draft, due_date: e.target.value })} /></label><label>Time<input type="time" value={draft.due_time} onChange={(e) => setDraft({ ...draft, due_time: e.target.value })} /></label>{item.field_name && <label>Value<input value={draft.field_value} onChange={(e) => setDraft({ ...draft, field_value: e.target.value })} /></label>}<button disabled={busy} onClick={() => saveEdit(item)}>Save edit</button></div>}</div>)}<div><button disabled={busy || pending.some((item) => (item.needs_review === 1 && item.category === "ADDRESS REVIEW") || (!item.due_date && ["FOLLOW-UP", "APPOINTMENT"].includes(item.category)))} onClick={() => decide(pending)}>Accept all</button><button disabled={busy} onClick={() => decide(pending, true)}>Dismiss all</button></div></div>}
+    {pending.length > 0 && <div className="memo-suggestions">{pending.map((item) => <div className="sms-suggestion" key={item.id}><div><b>{item.category}{item.commitment ? " · PROMISED" : ""}</b><strong>{item.title}</strong><small>{item.due_date ? `${when(item.due_date)}${item.due_time ? ` at ${item.due_time}` : item.daypart ? ` · ${item.daypart}` : " · Time not set"}` : "No due date"}</small><small>Source: “{item.source_excerpt}”</small>{item.needs_review === 1 && <em>Review timing before accepting</em>}</div><div className="sms-suggestion-actions"><button disabled={busy || (item.needs_review === 1 && item.category === "ADDRESS REVIEW") || (!item.due_date && ["FOLLOW-UP", "APPOINTMENT"].includes(item.category))} onClick={() => decide([item])}>Accept</button><button disabled={busy} onClick={() => { setEditing(item.id); setDraft({ title: item.title, due_date: item.due_date || "", due_time: item.due_time || "", field_value: item.field_value || "" }); }}>Edit</button><button disabled={busy} onClick={() => decide([item], true)}>Dismiss</button></div>{editing === item.id && <div className="sms-edit"><label>Title<input value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} /></label><label>Date<input type="date" value={draft.due_date} onChange={(e) => setDraft({ ...draft, due_date: e.target.value })} /></label><label>Time{item.category === "APPOINTMENT" && <small>7:00 AM–8:00 PM Central</small>}<input type="time" min={item.category === "APPOINTMENT" ? "07:00" : undefined} max={item.category === "APPOINTMENT" ? "20:00" : undefined} value={draft.due_time} onChange={(e) => setDraft({ ...draft, due_time: e.target.value })} /></label>{item.field_name && <label>Value<input value={draft.field_value} onChange={(e) => setDraft({ ...draft, field_value: e.target.value })} /></label>}<button disabled={busy} onClick={() => saveEdit(item)}>Save edit</button></div>}</div>)}<div><button disabled={busy || pending.some((item) => (item.needs_review === 1 && item.category === "ADDRESS REVIEW") || (!item.due_date && ["FOLLOW-UP", "APPOINTMENT"].includes(item.category)))} onClick={() => decide(pending)}>Accept all</button><button disabled={busy} onClick={() => decide(pending, true)}>Dismiss all</button></div></div>}
   </section>;
 }
 
@@ -1961,15 +2008,22 @@ function Modal({
 function EmailModal({c,close,reload}: {c:Rec;close:()=>void;reload:()=>Promise<void>}) {
   const addresses = [...new Set([c.email,...String(c.additional_emails||"").split(/\r?\n/).map(value=>value.split("|")[0])].map(value=>String(value||"").trim()).filter(Boolean))];
   const [to,setTo]=useState(addresses[0]||""),[subject,setSubject]=useState(""),[body,setBody]=useState(""),[status,setStatus]=useState<Rec|null>(null),[busy,setBusy]=useState(false),[error,setError]=useState(""),[sent,setSent]=useState(false);
+  const [attachments,setAttachments]=useState<File[]>([]),[dragging,setDragging]=useState(false);const attachmentInput=useRef<HTMLInputElement>(null);
+  const addAttachments=(incoming:File[])=>{if(busy)return;const next=[...attachments];for(const file of incoming)if(!next.some(x=>x.name===file.name&&x.size===file.size&&x.lastModified===file.lastModified))next.push(file);if(next.length>10){setError("Attach up to 10 files.");return;}if(next.reduce((sum,f)=>sum+f.size,0)>2_500_000){setError("Attachments must total 2.5 MB or less.");return;}setAttachments(next);setError('');};
   useEffect(()=>{fetch("/api/microsoft/status").then(r=>r.json() as Promise<Rec>).then(setStatus).catch(()=>setError("Could not check your Microsoft 365 connection."))},[]);
   const reconnect=async()=>{setBusy(true);setError("");try {const response=await fetch("/api/microsoft/connect",{method:"POST"});const result=await response.json() as Rec;if(!response.ok)throw Error(result.error||"Could not start Microsoft sign-in.");window.location.assign(result.url)}catch(reason){setError(reason instanceof Error?reason.message:"Could not start Microsoft sign-in.");setBusy(false)}};
-  const send=async(e:React.FormEvent)=>{e.preventDefault();setBusy(true);setError("");try {const response=await fetch("/api/microsoft/send",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({contactId:c.id,to,subject,body})});const result=await response.json() as Rec;if(!response.ok)throw Error(result.error||"Email could not be sent.");setSent(true);await reload()}catch(reason){setError(reason instanceof Error?reason.message:"Email could not be sent.")}finally{setBusy(false)}};
+  const send=async(e:React.FormEvent)=>{e.preventDefault();setBusy(true);setError("");try {const form=new FormData();form.set("contactId",String(c.id));form.set("to",to);form.set("subject",subject);form.set("body",body);attachments.forEach(f=>form.append("attachments",f));const response=await fetch("/api/microsoft/send",{method:"POST",body:form});const result=await response.json() as Rec;if(!response.ok)throw Error(result.error||"Email could not be sent.");setSent(true);await reload()}catch(reason){setError(reason instanceof Error?reason.message:"Email could not be sent.")}finally{setBusy(false)}};
   return <Modal title={`Email ${c.display_name||`${c.first_name} ${c.last_name}`}`} close={close}>
     {sent ? <div role="status"><p>Microsoft 365 accepted your email. It will appear in this contact’s email history when Sent Items sync completes.</p><div className="form-actions"><button className="primary" onClick={close}>Done</button></div></div> : status?.ownedByAnotherAccount ? <p>Sign in with the account that connected this mailbox to send email.</p> : !status ? <p>Checking Microsoft 365 connection…</p> : !status.connected || !status.canSend ? <div><p>{status.connected ? "Your mailbox is connected for reading. Approve Microsoft’s Mail.Send permission once to send from your connected mailbox." : "Connect Microsoft 365 to send from your connected mailbox."}</p><button className="primary" disabled={busy} onClick={reconnect}>{busy?"Opening Microsoft…":status.connected?"Approve sending permission":"Connect Microsoft 365"}</button></div> : addresses.length===0 ? <p>This contact has no email address. Close this window and use Edit contact to add one.</p> : <form onSubmit={send}>
       <p>From: <b>{status.mailbox}</b></p>
       <label>To<select value={to} onChange={e=>setTo(e.target.value)}>{addresses.map(address=><option key={address}>{address}</option>)}</select></label>
       <label>Subject<input required maxLength={998} value={subject} onChange={e=>setSubject(e.target.value)}/></label>
       <label>Message<textarea required className="email-compose-body" value={body} onChange={e=>setBody(e.target.value)} placeholder="Write your email…"/></label>
+      <section className={"email-attachments "+(dragging?"dragging":"")} aria-label="Email attachments" onDragOver={e=>{e.preventDefault();if(!busy)setDragging(true);}} onDragLeave={e=>{if(!e.currentTarget.contains(e.relatedTarget as Node))setDragging(false);}} onDrop={e=>{e.preventDefault();setDragging(false);addAttachments(Array.from(e.dataTransfer.files));}}>
+        <input ref={attachmentInput} type="file" multiple hidden disabled={busy} onChange={e=>{addAttachments(Array.from(e.target.files||[]));e.target.value='';}}/>
+        <button type="button" disabled={busy} onClick={()=>attachmentInput.current?.click()}>Attach documents</button><p>Drag and drop files here</p><small>Up to 10 files · 2.5 MB total</small>
+        {attachments.map((f,i)=><div className="email-attachment-file" key={`${f.name}-${f.size}-${f.lastModified}`}><span>{f.name} · {(f.size/1000).toFixed(0)} KB</span><button type="button" disabled={busy} aria-label={`Remove ${f.name}`} onClick={()=>setAttachments(v=>v.filter((_,n)=>n!==i))}>Remove</button></div>)}
+      </section>
       <p className="email-footer-note">Your IABS, Consumer Protections Notice, and contact details are added automatically when you send.</p>
       <div className="form-actions"><button type="button" className="ghost" onClick={close} disabled={busy}>Cancel</button><button className="primary" type="submit" disabled={busy||!to}>{busy?"Sending…":"Send email"}</button></div>
     </form>}
@@ -1977,19 +2031,19 @@ function EmailModal({c,close,reload}: {c:Rec;close:()=>void;reload:()=>Promise<v
   </Modal>;
 }
 
-function ContactChoices({label,value,onChange,contacts,tags=false}:{label:string;value:string;onChange:(v:string)=>void;contacts:Rec[];tags?:boolean}) {
+function ContactChoices({label,value,onChange,contacts,tags=false,showSelected=true}:{label:string;value:string;onChange:(v:string)=>void;contacts:Rec[];tags?:boolean;showSelected?:boolean}) {
  const [adding,setAdding]=useState(false),[newValue,setNewValue]=useState('');
  const key=(v:string)=>v.trim().replace(/^#+/,'').replace(/[\s_-]+/g,' ').toLowerCase();
  const choices=Array.from(new Map(contacts.flatMap(c=>tags?String(c.tags||'').split(','):[String(c.lead_source||'')]).map(v=>v.trim()).filter(Boolean).map(v=>[key(v),v])).values()).sort((a,b)=>a.localeCompare(b));
  const selected=tags?value.split(',').map(v=>v.trim()).filter(Boolean):[];
  const add=(v:string)=>{const canonical=choices.find(x=>key(x)===key(v))||v.trim();if(!canonical)return;if(tags){if(!selected.some(x=>key(x)===key(canonical)))onChange([...selected,canonical].join(','));}else onChange(canonical);};
- return <div className="contact-choice"><label>{label}<select value={tags?'':value||''} onChange={e=>{if(e.target.value==='__new__'){setAdding(true);return;}if(tags)add(e.target.value);else onChange(e.target.value);}}><option value="">{tags?'Choose a tag':'Choose lead source'}</option>{!tags&&value&&!choices.includes(value)&&<option>{value}</option>}{choices.filter(v=>!tags||!selected.some(x=>key(x)===key(v))).map(v=><option key={v}>{v}</option>)}<option value="__new__">Add new {tags?'tag':'lead source'}…</option></select></label>{tags&&<div className="choice-tags">{selected.map(v=><button type="button" key={v} aria-label={`Remove ${v}`} onClick={()=>onChange(selected.filter(x=>x!==v).join(','))}>{v} ×</button>)}</div>}{adding&&<div><input aria-label={`New ${label}`} value={newValue} onChange={e=>setNewValue(e.target.value)} placeholder={`New ${label.toLowerCase()}`}/><button type="button" disabled={!newValue.trim()} onClick={()=>{add(newValue);setNewValue('');setAdding(false);}}>Add</button><button type="button" onClick={()=>setAdding(false)}>Cancel</button></div>}</div>;
+ return <div className="contact-choice"><label>{label}<select value={tags?'':value||''} onChange={e=>{if(e.target.value==='__new__'){setAdding(true);return;}if(tags)add(e.target.value);else onChange(e.target.value);}}><option value="">{tags?'Choose a tag':'Choose lead source'}</option>{!tags&&value&&!choices.includes(value)&&<option>{value}</option>}{choices.filter(v=>!tags||!selected.some(x=>key(x)===key(v))).map(v=><option key={v}>{v}</option>)}<option value="__new__">Add new {tags?'tag':'lead source'}…</option></select></label>{tags&&showSelected&&<div className="choice-tags">{selected.map(v=><button type="button" key={v} aria-label={`Remove ${v}`} onClick={()=>onChange(selected.filter(x=>x!==v).join(','))}>{v} ×</button>)}</div>}{adding&&<div><input aria-label={`New ${label}`} value={newValue} onChange={e=>setNewValue(e.target.value)} placeholder={`New ${label.toLowerCase()}`}/><button type="button" disabled={!newValue.trim()} onClick={()=>{add(newValue);setNewValue('');setAdding(false);}}>Add</button><button type="button" onClick={()=>setAdding(false)}>Cancel</button></div>}</div>;
 }
 function RecordModal({kind,c,existing,close,act,contacts=[]}: {contacts?:Rec[];kind:"contact"|"appointment"|"transaction"|"task";c:Rec;existing?:Rec;close:()=>void;act:(p:Rec)=>Promise<boolean>}) {
   const details = (() => {try {return JSON.parse(existing?.details || "{}")} catch {return {}}})();
   const [f,setF] = useState<Rec>(kind === "contact" ? {...c,...splitContactAddress(c.address),originalAddress:c.address} : kind === "appointment" || kind === "task" ? {contactId:c.id,id:existing?.id,title:existing?.title||"",dueDate:existing?.due_date||today(),dueTime:existing?.due_time||"",status:existing?.status||"Scheduled",notes:existing?.notes||"",precision:existing?.due_time?"exact":"date only",...details} : {contactId:c.id,id:existing?.id,type:existing?.type||"Seller",stage:existing?.stage||"Opportunity",propertyAddress:existing?.property_address||"",notes:existing?.notes||"",...details});
   const [busy,setBusy] = useState(false);
-  const field = (key:string,label:string,type="text",required=false) => <label key={key}>{label}<input type={type} required={required} value={f[key] ?? ""} onChange={e=>setF(prev=>({...prev,[key]:e.target.value,...(key.startsWith("address") ? {addressEdited:true} : {})}))}/></label>;
+  const field = (key:string,label:string,type="text",required=false) => <label key={key}>{label}<input type={type} min={type === "time" && kind === "appointment" ? "07:00" : undefined} max={type === "time" && kind === "appointment" ? "20:00" : undefined} required={required} value={f[key] ?? ""} onChange={e=>setF(prev=>({...prev,[key]:e.target.value,...(key.startsWith("address") ? {addressEdited:true} : {})}))}/></label>;
   const choice = (key:string,label:string,options:string[]) => <label key={key}>{label}<select value={f[key]||options[0]} onChange={e=>setF(prev=>({...prev,[key]:e.target.value,...(key.startsWith("address") ? {addressEdited:true} : {})}))}>{options.map(o=><option key={o}>{o}</option>)}</select></label>;
   const contactFields = [field("first_name","First name","text",true),field("last_name","Last name","text",true),field("display_name","Display name"),field("phone","Primary phone","tel"),choice("phone_type","Phone type",["Mobile","Home","Work","Other"]),<label key="additional_phones">Additional phones (number | type, one per line)<textarea value={f.additional_phones||""} onChange={e=>setF(prev=>({...prev,additional_phones:e.target.value}))}/></label>,field("email","Primary email","email"),choice("email_type","Email type",["Personal","Work","Other"]),<label key="additional_emails">Additional emails (email | type, one per line)<textarea value={f.additional_emails||""} onChange={e=>setF(prev=>({...prev,additional_emails:e.target.value}))}/></label>,field("addressStreet","Contact address · street"),field("addressCity","City"),field("addressState","State"),field("addressZip","ZIP code"),field("addressCountry","Country (optional)"),field("property_address","Seller property address"),choice("relationship","Relationship",[...relationshipOptions]),choice("intent","Intent",[...intentOptions]),choice("stage","Stage",[...stageOptions]),<ContactChoices key="lead_source" label="Lead source" contacts={contacts} value={f.lead_source||""} onChange={v=>setF(prev=>({...prev,lead_source:v}))}/>,choice("temperature","Temperature",["Hot","Warm","Cool"]),<ContactChoices key="tags" label="Tags" tags contacts={contacts} value={f.tags||""} onChange={v=>setF(prev=>({...prev,tags:v}))}/>,field("birthday","Birthday","date"),field("spouse_name","Spouse / partner"),field("contextual_notes","Contact notes")];
   const appointmentFields = [field("title","Title / purpose","text",true),field("dueDate","Date","date",true),choice("precision","Scheduling precision",["exact","date only","daypart","flexible"]),...(f.precision === "exact" ? [field("dueTime","Time","time"),field("endTime","End time (optional)","time")] : []),...(f.precision === "daypart" ? [choice("daypart","Daypart",["Morning","Afternoon","Evening"])] : []),field("location","Location"),field("propertyAddress","Property address"),field("reminder","Reminder"),choice("status","Status",["Scheduled","Completed","Cancelled","No-show"]),<label key="inviteContact"><input type="checkbox" checked={!!f.inviteContact} onChange={e=>setF(prev=>({...prev,inviteContact:e.target.checked}))}/> Invite contact by Outlook email</label>,<label key="commitment"><input type="checkbox" checked={!!f.commitment} onChange={e=>setF(prev=>({...prev,commitment:e.target.checked}))}/> Commitment</label>,field("notes","Notes")];
@@ -2189,6 +2243,8 @@ function TaskModal({
             Due time
             <input
               type="time"
+              min={f.type === "Appointment" ? "07:00" : undefined}
+              max={f.type === "Appointment" ? "20:00" : undefined}
               onChange={(e) => set("dueTime", e.target.value)}
             />
           </label>

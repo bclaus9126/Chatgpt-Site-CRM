@@ -420,6 +420,27 @@ async function handleLifecycle(event: TelnyxEvent, webhookUrl: string) {
             "UPDATE communications SET status='Calling contact' WHERE id=?",
           ).bind(flow.communication_id),
         ]);
+        // Brad has already answered. Ask Telnyx to supply ringback while the
+        // contact is still ringing; normal speech replaces it when answered.
+        // Keep the existing answer-time bridge as a fallback if this request fails.
+        try {
+          const response = await bridgeCalls({
+            callControlId: String(p.call_control_id),
+            targetCallControlId: String(contactLeg.call_control_id),
+            commandId: `${flow.id}:ringback`,
+            playRingtone: true,
+          });
+          await saveControlEvent(event, "outbound.ringback_requested", {
+            flow_id: flow.id, brad_call_control_id: p.call_control_id,
+            contact_call_control_id: contactLeg.call_control_id,
+            provider_result: response?.result ?? null,
+          });
+        } catch (error) {
+          await saveControlEvent(event, "outbound.ringback_failed", {
+            flow_id: flow.id,
+            reason: error instanceof Error ? error.message : "Ringback request failed",
+          });
+        }
       } catch (error) {
         console.error("Outbound contact leg failed", {
           flowId: flow.id,
