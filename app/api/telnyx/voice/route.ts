@@ -7,6 +7,8 @@ import {
   bridgeCalls,
   decodeClientState,
   dialCall,
+  stopCallPlayback,
+  hangupCall,
   normalizePhone,
 } from "@/lib/telnyx-call-control";
 import { saveCallAnalysis } from "@/lib/call-analysis";
@@ -411,6 +413,9 @@ async function handleLifecycle(event: TelnyxEvent, webhookUrl: string) {
           commandId: `${flow.id}:contact`,
           linkTo: String(p.call_control_id),
           record: true,
+          // Telnyx requires a finite timeout (default 30s, maximum 600s).
+          // Allow voicemail to answer without a short CRM-imposed cutoff.
+          timeoutSecs: 600,
         });
         await env.DB.batch([
           env.DB.prepare(
@@ -442,6 +447,7 @@ async function handleLifecycle(event: TelnyxEvent, webhookUrl: string) {
           });
         }
       } catch (error) {
+        await hangupCall(String(p.call_control_id), `${flow.id}:dial-failed-hangup`).catch(error=>console.error('Outbound cleanup failed', {flowId:flow.id,error:String(error)}));
         console.error("Outbound contact leg failed", {
           flowId: flow.id,
           error: error instanceof Error ? error.message : error,
@@ -504,6 +510,7 @@ async function handleLifecycle(event: TelnyxEvent, webhookUrl: string) {
     flow.brad_call_control_id
   ) {
     try {
+      await stopCallPlayback(flow.brad_call_control_id, `${flow.id}:answer-stop-ringback`).catch(error=>console.error('Could not stop outbound ringback', {flowId:flow.id,error:String(error)}));
       await bridgeCalls({
         callControlId: String(p.call_control_id),
         targetCallControlId: flow.brad_call_control_id,
@@ -544,6 +551,23 @@ async function handleLifecycle(event: TelnyxEvent, webhookUrl: string) {
       ).bind(timestamp, flow.communication_id),
     ]);
   if (type === "call.hangup") {
+    if (flow.direction === 'outgoing') {
+      // Ringback is generated on Brad's leg. It otherwise keeps playing after
+      // the destination rejects the call or its dial timer expires.
+      const peer = role === 'contact' ? flow.brad_call_control_id : role === 'brad' ? flow.contact_call_control_id : null;
+      if (peer && peer !== p.call_control_id) {
+        const results = await Promise.allSettled([
+          ...(role === 'contact' ? [stopCallPlayback(peer, `${flow.id}:end-stop-ringback`)] : []),
+          hangupCall(peer, `${flow.id}:end-${role}-peer`),
+        ]);
+        for (const result of results) if (result.status === 'rejected') console.error('Outbound peer cleanup failed',{flowId:flow.id,error:String(result.reason)});
+      }
+      if (role === 'contact') {
+        const cause = String(p.hangup_cause || 'unknown');
+        const outcome = ['timeout','no_answer'].includes(cause) ? 'No answer' : cause === 'not_found' ? 'Destination not found / routing failure' : cause === 'user_busy' ? 'Busy' : 'Call ended before connection';
+        await env.DB.prepare('UPDATE communications SET call_outcome=CASE WHEN bridged_at IS NULL THEN ? ELSE call_outcome END WHERE id=?').bind(outcome,flow.communication_id).run();
+      }
+    }
     const duration =
       typeof p.call_duration_secs === "number" ? p.call_duration_secs : null;
     await env.DB.prepare(

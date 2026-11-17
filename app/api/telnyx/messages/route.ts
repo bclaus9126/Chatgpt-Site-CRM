@@ -21,7 +21,7 @@ export async function GET(request: Request) {
   const errors = [...(Array.isArray(recipient.errors) ? recipient.errors : []),...(Array.isArray(p.errors) ? p.errors : [])];
   const reason = errors.map((e: Record<string,any>) => [e.code,e.title || e.detail].filter(Boolean).join(": ")).filter(Boolean).join("; ").slice(0,500);
   await env.DB.prepare("UPDATE communications SET status=?,subject=? WHERE external_provider_id=? AND source_system='telnyx' AND type='SMS'").bind(status,reason || null,`telnyx-sms:${id}`).run();
-  return Response.json({status,reason});
+  return Response.json({status,reason},{headers:{"Cache-Control":"no-store"}});
 }
 
 export async function POST(request: Request) {
@@ -49,8 +49,11 @@ export async function POST(request: Request) {
     return Response.json({error:`Telnyx rejected SMS from ${BUSINESS_NUMBER} (HTTP ${response.status}, code ${result.errors?.[0]?.code||"unknown"}): ${String(result.errors?.[0]?.title||"Rejected").slice(0,200)}.`},{status:502});
   }
   const p = result.data, occurredAt = p.sent_at || new Date().toISOString();
+  const status = String(p.to?.[0]?.status || p.status || "queued");
+  const errors = [...(Array.isArray(p.to?.[0]?.errors) ? p.to[0].errors : []),...(Array.isArray(p.errors) ? p.errors : [])];
+  const reason = errors.map((e:Record<string,any>)=>[e.code,e.title||e.detail].filter(Boolean).join(": ")).join("; ").slice(0,500);
   await env.DB.prepare(`INSERT INTO communications (contact_id,type,direction,occurred_at,message_transcript,status,source_system,source_record_id,external_provider_id,from_number,to_number,imported,author_name,participants)
     VALUES (?,'SMS','outbound',?,?,?,?,?,?,?,?,0,'Brad Claus',?) ON CONFLICT(external_provider_id) DO NOTHING`)
-    .bind(contact.id,occurredAt,text,String(p.to?.[0]?.status || "Sent"),"telnyx",String(p.id),`telnyx-sms:${p.id}`,BUSINESS_NUMBER,to,JSON.stringify({sender_name:"Brad Claus",recipient_name:`${contact.first_name} ${contact.last_name}`,from:BUSINESS_NUMBER,to,telnyx_message_id:p.id,media:mediaUrl ? [{url:mediaUrl}] : []})).run();
-  return Response.json({ok:true,messageId:p.id});
+    .bind(contact.id,occurredAt,text,status,"telnyx",String(p.id),`telnyx-sms:${p.id}`,BUSINESS_NUMBER,to,JSON.stringify({sender_name:"Brad Claus",recipient_name:`${contact.first_name} ${contact.last_name}`,from:BUSINESS_NUMBER,to,telnyx_message_id:p.id,media:mediaUrl ? [{url:mediaUrl}] : []})).run();
+  return Response.json({ok:true,messageId:p.id,status,reason,to});
 }

@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { authorizeCrmOwner } from "@/lib/crm-auth";
 import { ensureStarterCampaign, enroll, prepareInterruptedTestRetry, prepareFailedTestEmailRetry, scheduleStep, stopContact } from "@/lib/campaign";
+import { manuallyEnroll } from "@/lib/manual-campaign-enrollment";
 export const dynamic="force-dynamic";
 type Row=Record<string,any>;
 const db=()=>env.DB;
@@ -62,6 +63,8 @@ export async function POST(request:Request) {
       else {const m=await db().prepare('SELECT channel FROM campaign_messages WHERE id=?').bind(templateId).first<Row>();if(m?.channel!==step.channel)throw Error('Template channel mismatch');await db().prepare('INSERT INTO campaign_step_templates (step_id,lead_subtype,template_id) VALUES (?,?,?) ON CONFLICT(step_id,lead_subtype) DO UPDATE SET template_id=excluded.template_id').bind(stepId,subtype,templateId).run();}
     } else if(b.action==='responsive') {
       const contactId=Number(b.contactId);if(!Number.isSafeInteger(contactId))throw Error('Invalid contact');await stopContact(contactId,'Marked responsive by Brad');
+    } else if(b.action==='manual_enroll') {
+      await manuallyEnroll(db(),b);
     } else if(b.action==='enroll') {
       await enroll(Number(b.contactId),Number(b.campaignId),b.leadSubtype||null,!!b.testMode,Number(b.testIntervalMinutes)||5);
     } else if(b.action==='retry_interrupted_test' && b.confirmedNotReceived===true) {

@@ -4,7 +4,7 @@ import { normalizePhone, BUSINESS_NUMBER, BRAD_CELL, isBusinessNumber } from "@/
 import { analyzeSmsConversation } from "@/lib/sms-analysis";
 import { createInboundDraft } from "@/lib/claus-ai/auto-draft";
 import { indexPending } from "@/lib/claus-ai/indexer";
-import { archiveInboundImages } from "@/lib/telnyx-media";
+import { archiveInboundMedia } from "@/lib/telnyx-media";
 import { stopContact } from "@/lib/campaign";
 import { notifyInboundSms } from "@/lib/push";
 
@@ -51,15 +51,23 @@ async function handle(event: Row, origin: string) {
   const inbound = type === "message.received", phone = inbound ? from : to;
   if (!phone || !from || !to || (inbound && !isBusinessNumber(to))) return;
   const contact = await matchingContact(phone);
-  const media = inbound ? await archiveInboundImages(p.media,origin) : [];
+  const attachments = inbound ? {media:[],media_expected:Array.isArray(p.media)?p.media.length:0,media_pending:hasMedia} : {media:[]};
   const contactName = contact ? `${contact.first_name} ${contact.last_name}`.trim() : phone;
   const time = Date.parse(data.occurred_at || p.received_at || p.sent_at || "");
   const occurredAt = Number.isFinite(time) ? new Date(time).toISOString() : new Date().toISOString();
+  const participants={sender_name:inbound ? contactName : "Brad Claus",recipient_name:inbound ? "Brad Claus" : contactName,from,to,telnyx_message_id:id,...attachments};
   const saved = await env.DB.prepare(`INSERT INTO communications (contact_id,type,direction,occurred_at,message_transcript,status,source_system,source_record_id,external_provider_id,from_number,to_number,imported,author_name,participants)
     VALUES (?,'SMS',?,?,?,?,?,?,?,?,?,0,?,?) ON CONFLICT(external_provider_id) DO NOTHING`)
-    .bind(contact?.id ?? null,inbound ? "inbound" : "outbound",occurredAt,String(p.text || ""),inbound ? "Received" : "Sent","telnyx",id,key(id),from,to,inbound ? contactName : "Brad Claus",JSON.stringify({sender_name:inbound ? contactName : "Brad Claus",recipient_name:inbound ? "Brad Claus" : contactName,from,to,telnyx_message_id:id,media})).run();
+    .bind(contact?.id ?? null,inbound ? "inbound" : "outbound",occurredAt,String(p.text || ""),inbound ? "Received" : "Sent","telnyx",id,key(id),from,to,inbound ? contactName : "Brad Claus",JSON.stringify(participants)).run();
   if (!saved.meta.changes) return;
   const communicationId = Number(saved.meta.last_row_id);
+  // Persist the text and attachment count first, so a slow/failed media download
+  // cannot erase an incoming message. Recovery can resume a pending attachment.
+  if(inbound && hasMedia){
+    const archived=await archiveInboundMedia(p.media,origin);
+    await env.DB.prepare("UPDATE communications SET participants=? WHERE id=?").bind(JSON.stringify({...participants,...archived,media_pending:false}),communicationId).run();
+  }
+
   if (inbound && contact) {
     if (/^\s*(stop|unsubscribe|cancel|end|quit)\s*[.!]?\s*$/i.test(String(p.text || ""))) await env.DB.prepare("UPDATE contacts SET sms_opt_out=1 WHERE id=?").bind(contact.id).run();
     await stopContact(Number(contact.id),"Inbound SMS reply",occurredAt);

@@ -1,3 +1,4 @@
+import { deliverLeadNotifications } from '@/lib/lead-notifications';
 import { migrateExisting } from '@/lib/real-estate';
 import { env, waitUntil } from 'cloudflare:workers';
 import { runDue } from '@/lib/campaign';
@@ -17,6 +18,7 @@ function authorized(request:Request) {
 
 export async function POST(request:Request) {
   if(!authorized(request)) return Response.json({error:'Unauthorized'},{status:401,headers:{'cache-control':'no-store'}});
+  waitUntil(deliverLeadNotifications().catch(()=>console.error('Lead notification outbox deferred')));
   waitUntil(migrateExisting().catch(()=>console.error('Real estate backfill deferred')));
   try {waitUntil(runDue(1,false).catch(async()=>{await env.DB.prepare("UPDATE campaign_settings SET scheduler_last_failure_at=?,scheduler_last_failure_reason='Background runner failed; review execution history' WHERE id=1").bind(new Date().toISOString()).run();}));return Response.json({accepted:true,status:'queued',summaryLocation:'/api/campaigns/health'},{headers:{'cache-control':'no-store'}});}
   catch(error) {

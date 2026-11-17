@@ -23,7 +23,7 @@ async function load(db: D1Database) {
   ] = await Promise.all([
     db
       .prepare(
-        "SELECT * FROM contacts ORDER BY CASE temperature WHEN 'Hot' THEN 1 WHEN 'Warm' THEN 2 ELSE 3 END,next_follow_up",
+        "SELECT * FROM contacts ORDER BY id DESC",
       )
       .all(),
     db
@@ -98,6 +98,9 @@ export async function POST(req: Request) {
       // the database's foreign keys remain enforced throughout the operation.
       const id = b.id;
       await db.batch([
+        // Intake deletion cascades to delivery history and its index cleanup
+        // trigger removes queued/embedded lead data before the contact goes.
+        db.prepare("DELETE FROM lead_intakes WHERE contact_id=?").bind(id),
         db.prepare("DELETE FROM claus_ai_drafts WHERE contact_id=? OR communication_id IN (SELECT id FROM communications WHERE contact_id=?)").bind(id,id),
         db.prepare("DELETE FROM communication_suggestions WHERE communication_id IN (SELECT id FROM communications WHERE contact_id=?)").bind(id),
         db.prepare("DELETE FROM telnyx_call_flows WHERE contact_id=? OR communication_id IN (SELECT id FROM communications WHERE contact_id=?)").bind(id,id),
@@ -261,7 +264,7 @@ export async function POST(req: Request) {
     if (b.action === "addContact") {
       const created = await db
         .prepare(
-          "INSERT INTO contacts (first_name,last_name,phone,email,address,relationship,lead_source,intent,stage,temperature,next_follow_up,recommended_next_action,tags,email_consent) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
+          "INSERT INTO contacts (first_name,last_name,phone,email,address,relationship,lead_source,intent,stage,temperature,next_follow_up,recommended_next_action,tags,email_consent,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,CURRENT_TIMESTAMP)",
         )
         .bind(
           b.firstName,

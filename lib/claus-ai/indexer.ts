@@ -6,6 +6,7 @@ import { chunksOf, redactSecrets } from './chunks.mjs';
 type Row = Record<string, any>;
 const hash = async (s: string) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s))), b => b.toString(16).padStart(2, '0')).join('');
 async function source(db: D1Database, kind: string, id: number) {
+  if (kind === 'lead') return db.prepare('SELECT *,received_at occurred_at,source lead_source FROM lead_intakes WHERE id=? AND contact_id IS NOT NULL AND is_test=0').bind(id).first<Row>();
   if (kind === 'communication') return db.prepare('SELECT id,contact_id,occurred_at,subject,message_transcript,ai_summary,type,author_name,participants FROM communications WHERE id=?').bind(id).first<Row>();
   if (kind === 'note') return db.prepare('SELECT id,contact_id,created_at occurred_at,body FROM notes WHERE id=?').bind(id).first<Row>();
   if (kind === 'intelligence') return db.prepare("SELECT id,contact_id,source_date occurred_at,category,field_name,value,status FROM contact_intelligence WHERE id=? AND status='Current'").bind(id).first<Row>();
@@ -16,6 +17,7 @@ async function source(db: D1Database, kind: string, id: number) {
   return null;
 }
 function content(kind: string, row: Row) {
+  if(kind==='lead') {let answers:Record<string,unknown>={};try{answers=JSON.parse(row.metadata||'{}').answers||{};}catch{}return redactSecrets([row.message,row.notes,...Object.entries(answers).filter(([,v])=>typeof v==='string'&&v.length>80).map(([k,v])=>`${k}: ${v}`)].filter(Boolean).join('\n'));}
   if(['transaction','property','buyer_profile'].includes(kind)) {
     const groups=kind==='transaction'?transactionGroups:kind==='property'?propertyGroups:buyerGroups;
     return redactSecrets(allFields(groups).filter(f=>f.narrative&&row[f.key]).map(f=>`${f.label}: ${row[f.key]}`).join('\n'));
@@ -64,7 +66,7 @@ export async function indexPending(db: D1Database, limit = 1, includeFailed = fa
         try { const p = JSON.parse(row.participants || '{}'); recipient = Array.isArray(p.recipients) ? p.recipients.join(', ') : String(p.recipient_name || p.recipient || '') || null; thread = String(p.thread_id || p.threadId || p.conversationId || '') || null; } catch { /* optional metadata */ }
       }
       const writes = [db.prepare('DELETE FROM claus_ai_embeddings WHERE source_kind=? AND source_id=?').bind(kind,id)];
-      for (let i=0;i<parts.length;i++) writes.push(db.prepare('INSERT INTO claus_ai_embeddings (source_kind,source_id,contact_id,occurred_at,content_hash,provider,model,vector_json,chunk_index,content,source_type,sender,recipient,thread_id,metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').bind(kind,id,row.contact_id,row.occurred_at||null,digest,config.provider,config.model,JSON.stringify(vectors[i]),i,parts[i],kind === 'communication' ? row.type : kind,sender,recipient,thread,JSON.stringify({transaction_ids:row.transaction_ids?JSON.parse(row.transaction_ids):[],transaction_id:kind==='transaction'?id:row.transaction_id||null,contact_id:row.contact_id,property_id:row.property_id|| (kind==='property'?id:null),property_address:row.property_address||row.address||null,side:row.side||null,status:row.status||null,date:row.occurred_at,source_type:kind,source_record_id:id,field:row.field_name||'narrative',transaction_status:row.status||null,lead_source:row.lead_source||null})));
+      for (let i=0;i<parts.length;i++) writes.push(db.prepare('INSERT INTO claus_ai_embeddings (source_kind,source_id,contact_id,occurred_at,content_hash,provider,model,vector_json,chunk_index,content,source_type,sender,recipient,thread_id,metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').bind(kind,id,row.contact_id,row.occurred_at||null,digest,config.provider,config.model,JSON.stringify(vectors[i]),i,parts[i],kind === 'communication' ? row.type : kind,sender,recipient,thread,JSON.stringify({lead_intake_id:kind==='lead'?id:null,provider:row.provider||null,campaign:row.campaign||null,subtype:row.subtype||null,received_at:row.received_at||null,transaction_ids:row.transaction_ids?JSON.parse(row.transaction_ids):[],transaction_id:kind==='transaction'?id:row.transaction_id||null,contact_id:row.contact_id,property_id:row.property_id|| (kind==='property'?id:null),property_address:row.property_address||row.address||null,side:row.side||null,status:row.status||null,date:row.occurred_at,source_type:kind,source_record_id:id,field:row.field_name||'narrative',transaction_status:row.status||null,lead_source:row.lead_source||null})));
       writes.push(db.prepare("UPDATE claus_ai_index_queue SET status='done',error=NULL,updated_at=CURRENT_TIMESTAMP WHERE source_key=?").bind(`${kind}:${id}`));
       await db.batch(writes);
       indexed++; if (old?.n) updated++;

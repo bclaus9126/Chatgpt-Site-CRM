@@ -2,6 +2,12 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
 export function proxy(request: NextRequest) {
+  // Website submissions authenticate with their provider token in the route,
+  // not a browser's ChatGPT session. Keep this exception exact and POST-only.
+  if (request.method === "POST" && request.nextUrl.pathname === "/api/leads/inbound") {
+    return NextResponse.next();
+  }
+
   // Some embedded Sites requests include the authenticated email before the
   // stable user-id header is available. Treat either trusted dispatch header
   // as an authenticated ChatGPT request so the CRM does not enter a broken

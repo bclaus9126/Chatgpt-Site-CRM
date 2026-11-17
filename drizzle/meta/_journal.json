@@ -239,6 +239,34 @@
       "when": 1790871220234,
       "tag": "0033_breezy_vin_gonzales",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "6",
+      "when": 1791835200000,
+      "tag": "0034_lead_intake",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "6",
+      "when": 1793376000000,
+      "tag": "0035_facebook_campaign_titles",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "6",
+      "when": 1793385240000,
+      "tag": "0036_facebook_buyer_messages",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "6",
+      "when": 1793386500000,
+      "tag": "0037_facebook_property_enrollment",
+      "breakpoints": true
     }
   ]
 }

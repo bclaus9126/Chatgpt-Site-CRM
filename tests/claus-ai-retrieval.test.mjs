@@ -82,9 +82,9 @@ test("explicit contact names scope communication evidence before semantic rankin
 });
 
 test("ambiguous first name asks which contact, while a full name resolves", () => {
-  const contacts = [{ id: 1, first_name: "Jordan", last_name: "Example" }, { id: 2, first_name: "Jordan", last_name: "Sample" }];
-  assert.match(resolveNamedContact("What did Jordan say?", contacts).clarification, /Which contact/);
-  assert.equal(resolveNamedContact("What did Jordan Example say?", contacts).id, 1);
+  const contacts = [{ id: 1, first_name: "Lynne", last_name: "Patrick" }, { id: 2, first_name: "Lynne", last_name: "Smith" }];
+  assert.match(resolveNamedContact("What did Lynne say?", contacts).clarification, /Which contact/);
+  assert.equal(resolveNamedContact("What did Lynne Patrick say?", contacts).id, 1);
   assert.deepEqual(resolveNamedContact("Who mentioned downsizing?", contacts), {});
 });
 

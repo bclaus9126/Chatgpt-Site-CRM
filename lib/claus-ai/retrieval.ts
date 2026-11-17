@@ -42,6 +42,14 @@ export async function retrieve(db: D1Database, question: string, previousIds: nu
   const ids = named.id ? [named.id] : /\b(those|them|these|he|she|that contact)\b/.test(q) ? previousIds.slice(0, 30) : [];
   const estate=await realEstateRetrieval(db,question,ids);
   if(estate) return estate;
+  if (/\b(?:leads?|lead sources?|where did .+ come from)\b/.test(q) && /\b(?:website|facebook|zillow|homes|sources?|came|come from|respond|appointments?|received|leads?)\b/.test(q)) {
+    const clauses=["l.is_test=0"], bindings:unknown[]=[];
+    if(ids.length){clauses.push(`l.contact_id IN (${ids.map(()=>'?').join(',')})`);bindings.push(...ids);}
+    const provider=['website','facebook','zillow','homes'].find(p=>q.includes(p));if(provider){clauses.push('l.provider=?');bindings.push(provider);}
+    if(/this month/.test(q)){clauses.push('l.received_at>=?');bindings.push(`${today().slice(0,7)}-01`);}
+    const result=await rows(db,`SELECT l.id,l.contact_id,l.provider,l.source,l.subtype,l.property,l.campaign,l.received_at,l.message,l.enrollment_reason,c.first_name,c.last_name,(SELECT COUNT(*) FROM communications m WHERE m.contact_id=l.contact_id AND m.direction='outbound' AND m.occurred_at>=l.received_at) responses,(SELECT COUNT(*) FROM tasks t WHERE t.contact_id=l.contact_id AND t.type='Appointment' AND t.created_at>=l.received_at) appointments FROM lead_intakes l LEFT JOIN contacts c ON c.id=l.contact_id WHERE ${clauses.join(' AND ')} ORDER BY l.received_at DESC LIMIT 100`,bindings);
+    return {records:result.map(r=>({kind:'lead',...r})),evidence:result.map(r=>({kind:'lead',id:r.id,contactId:r.contact_id,contact:nameOf(r),date:r.received_at,excerpt:compact(`${r.source}: ${r.message||r.property||r.subtype}`),sourceUrl:r.contact_id?`/?contact=${r.contact_id}`:'/?leads=review'})),tools:['query_lead_intakes'],contactIds:result.map(r=>r.contact_id).filter(Boolean),totalMatches:result.length,resolvedContactId:named.id,thresholdNote:'At most 100 intake events. Response and appointment counts reflect subsequent activity, not proven attribution or client engagement.'};
+  }
   const contactIds: number[] = [];
   const push = (items: Row[], kind: string, describe: (r: Row) => string, date?: (r: Row) => string) => {
     for (const r of items) {

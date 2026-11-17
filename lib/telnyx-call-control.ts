@@ -44,6 +44,7 @@ export async function dialCall(input: {
   commandId: string;
   linkTo?: string;
   record?: boolean;
+  timeoutSecs?: number;
 }) {
   const apiKey = (env as unknown as { TELNYX_API_KEY?: string }).TELNYX_API_KEY;
   if (!apiKey) throw new Error("TELNYX_API_KEY is not configured");
@@ -58,6 +59,7 @@ export async function dialCall(input: {
       from: BUSINESS_NUMBER,
       to: input.to,
       bridge_intent: Boolean(input.linkTo),
+      ...(input.timeoutSecs ? { timeout_secs: input.timeoutSecs } : {}),
       ...(input.linkTo ? { link_to: input.linkTo } : {}),
       command_id: input.commandId,
       client_state: encodeClientState(input.clientState),
@@ -142,4 +144,23 @@ export async function bridgeCalls(input: {
     throw new Error(`Telnyx could not bridge the call (${response.status})`);
   }
   return result?.data;
+}
+
+// Use stable command IDs so webhook retries cannot repeat call-control actions.
+export async function stopCallPlayback(callControlId: string, commandId: string) {
+  return cleanupCallAction(callControlId, 'playback_stop', commandId, {stop:'all'});
+}
+export async function hangupCall(callControlId: string, commandId: string) {
+  return cleanupCallAction(callControlId, 'hangup', commandId);
+}
+async function cleanupCallAction(callControlId: string, action: string, commandId: string, extra = {}) {
+  const apiKey = (env as unknown as {TELNYX_API_KEY?: string}).TELNYX_API_KEY;
+  if (!apiKey) throw Error('TELNYX_API_KEY is not configured');
+  const response = await fetch(`https://api.telnyx.com/v2/calls/${encodeURIComponent(callControlId)}/actions/${action}`, {
+    method:'POST',headers:{Authorization:`Bearer ${apiKey}`,'Content-Type':'application/json'},
+    body:JSON.stringify({command_id:commandId,...extra}),signal:AbortSignal.timeout(10000),
+  });
+  const body = await response.json().catch(()=>null) as {errors?: {code?: string}[]} | null;
+  // Already-ended calls can race with the peer's hangup notification.
+  if (!response.ok && ![404,410].includes(response.status) && !body?.errors?.some(e=>String(e.code)==='90018')) throw Error(`Telnyx ${action} failed (${response.status})`);
 }

@@ -1,4 +1,6 @@
 "use client";
+import { LeadSettings, LeadCards } from "@/components/LeadIntake";
+import { smsDelivery } from "@/lib/sms-delivery.mjs";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   LayoutDashboard,
@@ -156,6 +158,7 @@ export default function Home() {
   const [reviewSourceAnchor, setReviewSourceAnchor] = useState("");
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
+    if(params.has("leads")){setView("Settings");return;}
     const tx=Number(params.get("transaction"));
     if(tx){setTransactionId(tx);setView("Transactions");window.history.replaceState({},"","/");return;}
     const contactId = Number(params.get("sms_contact")||params.get("contact"));
@@ -378,6 +381,7 @@ export default function Home() {
               go={go}
               act={act}
               openReview={openReview}
+              reload={load}
             />
           ) : view === "Contacts" ? (
             <>
@@ -428,8 +432,22 @@ function Loading() {
     </div>
   );
 }
-function TodayDashboard({ data, open, go, act, openReview }: { data: Data; open: (c: Rec) => void; go: (s: string) => void; act: (p: Rec) => Promise<boolean>; openReview: (contactId?:number|null)=>void }) {
+function TodayDashboard({ data, open, go, act, openReview, reload }: { data: Data; open: (c: Rec) => void; go: (s: string) => void; act: (p: Rec) => Promise<boolean>; openReview: (contactId?:number|null)=>void; reload:()=>Promise<void> }) {
   const [now, setNow] = useState(() => new Date());
+  const [smsContact,setSmsContact] = useState<Rec|null>(null);
+  const [calling,setCalling] = useState<number|null>(null);
+  const [callFeedback,setCallFeedback] = useState("");
+  const startCrmCall = async (c:Rec) => {
+    if(calling!==null)return;
+    setCalling(Number(c.id));setCallFeedback("");
+    try {
+      const response=await fetch("/api/telnyx/calls",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({contactId:c.id})});
+      const result=await response.json();if(!response.ok)throw Error(result.error||"Could not start the CRM call");
+      setCallFeedback(`Calling your cell first to connect you with ${c.first_name} ${c.last_name}.`);
+      await reload();open(c);
+    }catch(error){setCallFeedback(error instanceof Error?error.message:"Could not start the CRM call");}
+    finally{setCalling(null);}
+  };
   const [campaignIssues,setCampaignIssues] = useState<Rec[]>([]);
   useEffect(() => {const get=async()=>{try {const r=await fetch("/api/campaigns");if(r.ok){const body=await r.json() as Rec;setCampaignIssues((body.executions||[]).filter((x:Rec)=>["failed","blocked","manual"].includes(x.status)));}}catch{}};get();},[]);
   const [editing, setEditing] = useState<Rec | null>(null);
@@ -446,23 +464,28 @@ function TodayDashboard({ data, open, go, act, openReview }: { data: Data; open:
   const ordinaryTasks = tasks.filter(t => !promises.includes(t));
   const overdueFollowups = data.contacts.filter(c => c.next_follow_up && c.next_follow_up.slice(0,10) < day).sort((a,b) => a.next_follow_up.localeCompare(b.next_follow_up));
   const dueFollowups = data.contacts.filter(c => c.next_follow_up?.slice(0,10) === day);
-  const inbound = data.communications.filter(m => m.direction?.toLowerCase().includes("inbound") && m.contact_id && !m.is_sample && (!m.occurred_at || Date.now() - storedDateTime(m.occurred_at).getTime() < 14 * 864e5)).filter(m => !data.communications.some(other => other.contact_id === m.contact_id && other.direction?.toLowerCase().includes("outbound") && (other.source_system !== "telnyx" || !["sms","text"].includes(String(other.type).toLowerCase()) ? !/fail|reject|undeliver|cancel/i.test(String(other.status || "")) : String(other.status).toLowerCase() === "delivered") && storedDateTime(other.occurred_at).getTime() > storedDateTime(m.occurred_at).getTime())).sort((a,b) => storedDateTime(b.occurred_at).getTime() - storedDateTime(a.occurred_at).getTime());
+  const inbound = data.communications.filter(m => m.direction?.toLowerCase().includes("inbound") && m.contact_id && !m.is_sample && (!m.occurred_at || Date.now() - storedDateTime(m.occurred_at).getTime() < 14 * 864e5)).sort((a,b) => storedDateTime(b.occurred_at).getTime() - storedDateTime(a.occurred_at).getTime());
+  const hasLaterOutbound = (m: Rec) => data.communications.some(other => other.contact_id === m.contact_id && other.direction?.toLowerCase().includes("outbound") && (other.source_system !== "telnyx" || !["sms","text"].includes(String(other.type).toLowerCase()) ? !/fail|reject|undeliver|cancel/i.test(String(other.status || "")) : String(other.status).toLowerCase() === "delivered") && storedDateTime(other.occurred_at).getTime() > storedDateTime(m.occurred_at).getTime());
   const pendingIntelligence = reviewItems(data);
   const reviewSources = ["Calls","Texts","Emails","Voice Memos"].map(source => [source,pendingIntelligence.filter(item=>sourceName(item.communication.type)===source).length] as const).filter(([,count])=>count);
   const urgentReview = [...pendingIntelligence].filter(item=>reviewPriority(item)<=3).sort((a,b)=>reviewPriority(a)-reviewPriority(b)).slice(0,3);
   const moments = data.relationshipMoments.filter(m => { const d = m.date_value?.slice(5,10); if (!d) return false; const thisYear = `${day.slice(0,4)}-${d}`; let offset = (Date.parse(`${thisYear}T12:00:00Z`) - Date.parse(`${day}T12:00:00Z`)) / 864e5; if (offset < 0) offset = (Date.parse(`${Number(day.slice(0,4))+1}-${d}T12:00:00Z`) - Date.parse(`${day}T12:00:00Z`)) / 864e5; return offset >= 0 && offset <= 7; });
   const jump = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
   const schedule = (item: Rec) => { setEditing(item); setDraftDate(item.due_date?.slice(0,10) || day); };
-  const contactActions = (c: Rec) => <span className="today-actions">{c.phone && <><a href={`tel:${c.phone}`}>Call</a><a href={`sms:${c.phone}`}>Text</a></>}{c.email && <a href={`mailto:${c.email}`}>Email</a>}<button onClick={() => open(c)}>Open contact</button></span>;
+  const contactActions = (c: Rec) => <span className="today-actions">{c.phone && <><button type="button" disabled={calling!==null} onClick={()=>startCrmCall(c)}>{calling===Number(c.id)?"Calling…":"Call"}</button><button type="button" onClick={()=>setSmsContact(c)}>Text</button></>}{c.email && <a href={`mailto:${c.email}`}>Email</a>}<button onClick={() => open(c)}>Open contact</button></span>;
   const taskRow = (t: Rec) => <div className="today-row" key={t.id}><div><strong>{t.title}</strong><span><button className="today-link" onClick={() => openContact(t.contact_id)}>{t.contact_name || name(contact(t.contact_id))}</button> · {when(t.due_date)}{t.due_time ? ` at ${t.due_time}` : " · Time not set"}</span>{t.notes?.trim() && <small className="task-card-notes">{t.notes}</small>}{t.source_system && <small>Source: {t.source_system}</small>}</div><span className="today-actions"><button onClick={() => act({action:"completeTask",id:t.id})}>Complete</button><button onClick={() => schedule(t)}>Reschedule</button><button onClick={() => openContact(t.contact_id)}>Open contact</button></span></div>;
   const section = (id: string, title: string, count: number, emptyText: string, rows: React.ReactNode) => <section className="today-section" id={id}><h3>{title} <span>{count}</span></h3>{count ? rows : <p className="today-empty">{emptyText}</p>}</section>;
   return <div className="today-board"><section className="today-intro"><span>{new Intl.DateTimeFormat("en-US", { timeZone:"America/Chicago", weekday:"long", month:"long", day:"numeric" }).format(now)}</span><h2>Good {Number(new Intl.DateTimeFormat("en-US",{timeZone:"America/Chicago",hour:"numeric",hourCycle:"h23"}).format(now)) < 12 ? "morning" : "afternoon"}, Brad.</h2><p>Here’s what needs your attention.</p><div className="today-counts">{[["Overdue follow-ups",overdueFollowups.length,"overdue-followups"],["Tasks due",tasks.length,"today-tasks"],["Appointments",appointments.length,"today-appointments"],["Recent inbound",inbound.length,"recent-inbound"],["Open promises",promises.length,"promises"]].map(([label,count,id]) => <button key={String(id)} onClick={() => jump(String(id))}><b>{count}</b> {label}</button>)}</div></section>
+  {callFeedback&&<p className="panel" role="status">{callFeedback}</p>}
+  {smsContact&&<Modal title={`Text ${smsContact.first_name} ${smsContact.last_name}`} close={()=>setSmsContact(null)}><SmsComposer contactId={Number(smsContact.id)} reload={reload}/></Modal>}
+  <LeadCards open={openContact} />
   {section("overdue-followups","Overdue Follow-Ups",overdueFollowups.length,"No overdue follow-ups.",overdueFollowups.map(c => <div className="today-row urgent" key={c.id}><div><button className="today-link" onClick={() => open(c)}><strong>{name(c)}</strong></button><span>{overdueDays(c.next_follow_up)} days overdue · {[c.relationship,c.intent,c.stage].filter(Boolean).join(" · ")}</span><small>Last contact: {when(c.last_meaningful_contact)}{c.recommended_next_action ? ` · ${c.recommended_next_action}` : ""}</small></div><span className="today-actions">{contactActions(c)}<button onClick={() => act({action:"completeFollowUp",contactId:c.id})}>Complete</button><button onClick={() => schedule({contact_id:c.id,followup:true,due_date:c.next_follow_up})}>Reschedule</button></span></div>))}
   {section("today-appointments","Today’s Appointments",appointments.length,"No appointments today.",appointments.map(t => { const c=contact(t.contact_id); let detail: Rec={}; try {detail=JSON.parse(t.details||"{}");} catch {} return <div className="today-row" key={t.id}><div><strong>{t.due_time || "Time not set"} · {t.title}</strong><span><button className="today-link" onClick={() => openContact(t.contact_id)}>{t.contact_name}</button>{detail.location ? ` · ${detail.location}` : ""}</span>{detail.propertyAddress && <small>{detail.propertyAddress}</small>}<small>{t.calendar_sync_status === "synced" ? "Synced to Outlook" : t.calendar_sync_status === "failed" ? "Sync failed" : "Calendar sync pending"}{t.notes ? ` · ${t.notes}` : ""}</small></div><span className="today-actions">{c && contactActions(c)}{detail.propertyAddress && <a target="_blank" rel="noopener noreferrer" href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(detail.propertyAddress)}`}>Directions</a>}<button onClick={() => act({action:"completeTask",id:t.id})}>Completed</button><button onClick={() => schedule(t)}>Reschedule</button>{t.calendar_sync_status === "failed" && <button onClick={async()=>{await fetch("/api/microsoft/calendar/retry",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({id:t.id})});window.location.reload();}}>Retry sync</button>}</span></div>; }))}
   {campaignIssues.length>0 && section("campaign-issues","Campaigns needing attention",campaignIssues.length,"",campaignIssues.map(x=><div className="today-row" key={x.id}><div><strong>{x.channel} · {x.status}</strong><small>{x.error||x.skipped_reason||"Review the campaign step"}</small></div><button onClick={()=>go("Campaigns")}>Open Campaigns</button></div>))}
   {section("today-tasks","Tasks Due / Overdue",ordinaryTasks.length,"You’re caught up on tasks due today.",ordinaryTasks.sort((a,b)=>(a.due_date||"").localeCompare(b.due_date||"")).map(taskRow))}
   <section className="today-section"><h3>Pending Intelligence <span>{pendingIntelligence.length}</span></h3>{pendingIntelligence.length ? <><p>{pendingIntelligence.length} recommendations need review · {reviewSources.map(([source,count])=>`${count} ${source}`).join(" · ")}</p><button className="review-now" onClick={()=>openReview()}>Review Now</button>{urgentReview.map(item=><div className="today-row" key={item.id}><div><strong>{item.contact.first_name} {item.contact.last_name} · {item.category}</strong><small>{item.title}</small></div><button onClick={()=>openReview(Number(item.contact.id))}>Review</button></div>)}</> : <p className="today-empty">You're caught up. No intelligence recommendations need review.</p>}</section>
-  {section("recent-inbound","Recent Inbound",inbound.length,"No unanswered inbound messages in the last 14 days.",inbound.slice(0,20).map(m => <div className="today-row" key={m.id}><div><button className="today-link" onClick={() => openContact(m.contact_id)}><strong>{name(contact(m.contact_id))}</strong></button><span>{m.type} · {whenDetailed(m.occurred_at)} · No later outbound response recorded</span><small>{(m.message_transcript || m.subject || m.ai_summary || "Inbound communication").slice(0,180)}</small></div>{contact(m.contact_id) && contactActions(contact(m.contact_id)!)}</div>))}
+  {section("recent-inbound","Recent Inbound",inbound.length,"No inbound communications in the last 14 days.",inbound.slice(0,20).map(m => <div className="today-row" key={m.id}><div><button className="today-link" onClick={() => openContact(m.contact_id)}><strong>{name(contact(m.contact_id))}</strong></button><span>{m.type} · {whenDetailed(m.occurred_at)} · {hasLaterOutbound(m) ? "Later outbound communication recorded" : "No later outbound response recorded"}</span><small>{(m.message_transcript || m.subject || m.ai_summary || "Inbound communication").slice(0,180)}</small></div>{contact(m.contact_id) && contactActions(contact(m.contact_id)!)}</div>))}
+  <div className="today-footer"><span>Latest {Math.min(inbound.length,20)} of {inbound.length} inbound communications from the last 14 days. Replies stay in this list.</span><button onClick={() => go("Communications")}>View all communications</button></div>
   {section("promises","Promises & Commitments",promises.length,"No open promises with a due date.",promises.map(taskRow))}
   {section("followups-today","Follow-Ups Today",dueFollowups.length,"No follow-ups scheduled today.",dueFollowups.map(c => <div className="today-row" key={c.id}><div><button className="today-link" onClick={() => open(c)}><strong>{name(c)}</strong></button><span>{c.recommended_next_action || "Follow up"} · {c.stage || "Stage unknown"}</span><small>Last contact: {when(c.last_meaningful_contact)}</small></div><span className="today-actions">{contactActions(c)}<button onClick={() => act({action:"completeFollowUp",contactId:c.id})}>Complete</button><button onClick={() => schedule({contact_id:c.id,followup:true,due_date:c.next_follow_up})}>Reschedule</button></span></div>))}
   {section("relationship-moments","Relationship Moments",moments.length,"No relationship moments in the next 7 days.",moments.map(m => <div className="today-row" key={m.id}><div><strong>{m.label || m.type}</strong><span><button className="today-link" onClick={() => openContact(m.contact_id)}>{name(contact(m.contact_id))}</button> · {m.date_value?.slice(5,10)}</span></div>{contact(m.contact_id) && contactActions(contact(m.contact_id)!)}</div>))}
@@ -701,7 +724,7 @@ function Contacts({
     <section className="panel table-panel">
       <PanelHead
         title="People, not records"
-        sub={`${visible.length} of ${contacts.length} contacts`}
+        sub={`${visible.length} of ${contacts.length} contacts · Newest added first`}
       />
       <div className="contact-classification-filters">
         <label>Relationship<select value={relationship} onChange={(e) => setRelationship(e.target.value)}><option value="">All relationships</option>{relationshipOptions.map((value) => <option key={value}>{value}</option>)}</select></label>
@@ -906,14 +929,15 @@ function Communications() {
   );
 }
 function SettingsPage({ act }: { act: (p: Rec) => Promise<boolean> }) {
-  const [section, setSection] = useState("Workspace");
+  const [section, setSection] = useState(() => typeof window !== "undefined" && new URLSearchParams(window.location.search).has("leads") ? "Lead Sources" : "Workspace");
   return (
     <section className="settings-layout">
       <aside className="settings-nav panel">
         <button className={section === "Workspace" ? "active" : ""} onClick={() => setSection("Workspace")}>Workspace</button>
+        <button className={section === "Lead Sources" ? "active" : ""} onClick={() => setSection("Lead Sources")}>Lead Sources / Integrations</button>
         <button className={section === "Data Import" ? "active" : ""} onClick={() => setSection("Data Import")}><FileSpreadsheet /> Data Import</button>
       </aside>
-      {section === "Data Import" ? <FubImporter act={act} /> : <div className="settings-grid">
+      {section === "Lead Sources" ? <LeadSettings /> : section === "Data Import" ? <FubImporter act={act} /> : <div className="settings-grid">
         <CampaignSchedulerStatus />
         <MobileNotifications />
         <article className="panel">
@@ -1249,6 +1273,14 @@ function ContactPage({
   openTransaction: (id:number) => void;
   reload: () => Promise<void>;
 }) {
+  useEffect(() => {
+    let cancelled=false;
+    fetch("/api/telnyx/media/recover",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({contactId:Number(c.id)})})
+      .then(async response=>response.ok?await response.json():null)
+      .then(async result=>{if(!cancelled&&result?.updated)await reload();})
+      .catch(()=>{});
+    return()=>{cancelled=true;};
+  },[c.id]);
   const [timelineFilter, setTimelineFilter] = useState("All"),
     [confirmDelete, setConfirmDelete] = useState(false),
     [deleting, setDeleting] = useState(false),
@@ -1561,6 +1593,7 @@ function ContactPage({
             {showFacts(otherFacts)}
             {!buyer && !seller && !buyerFacts.length && !sellerFacts.length && !buyerFields.length && !sellerFields.length && !otherFacts.length && <p className="compact-empty">No real estate details recorded.</p>}
           </SidebarSection>
+          <LeadCards contactId={Number(c.id)} />
           <SidebarSection title="Tasks" open>
             <button className="sidebar-add" onClick={() => setModal("task")}><Plus /> Add task</button>
             {upcomingTasks.filter((task) => task.type !== "Appointment").slice(0, 5).map((task) => (
@@ -1623,8 +1656,39 @@ function ContactPage({
 
 function SmsComposer({ contactId, reload }: { contactId: number; reload: () => Promise<void> }) {
   const [text, setText] = useState(""), [busy, setBusy] = useState(false), [error, setError] = useState(""), [image, setImage] = useState<File | null>(null);
+  const [receipt,setReceipt] = useState<Rec|null>(null), [deliveryError,setDeliveryError] = useState(""), [checking,setChecking] = useState(false);
+  const sending = useRef(false);
+  const checkDelivery = async () => {
+    if (!receipt?.messageId || checking) return;
+    setChecking(true);setDeliveryError("");
+    try {
+      const response=await fetch(`/api/telnyx/messages?messageId=${encodeURIComponent(receipt.messageId)}`,{cache:"no-store"});
+      const result=await response.json() as Rec;
+      if(!response.ok)throw Error(result.error||"Could not check delivery.");
+      setReceipt(current=>current?.messageId===receipt.messageId?{...current,status:result.status,reason:result.reason}:current);
+    }catch(cause){setDeliveryError(cause instanceof Error?cause.message:"Could not check delivery.");}
+    finally{setChecking(false);}
+  };
+  useEffect(()=>{
+    if(!receipt?.messageId || smsDelivery(receipt.status,receipt.reason).terminal)return;
+    let cancelled=false,attempts=0;
+    const timer=window.setInterval(async()=>{
+      if(++attempts>=24)window.clearInterval(timer);
+      try{
+        const response=await fetch(`/api/telnyx/messages?messageId=${encodeURIComponent(receipt.messageId)}`,{cache:"no-store"});
+        const result=await response.json() as Rec;
+        if(cancelled)return;
+        if(!response.ok)throw Error(result.error||"Could not check delivery.");
+        setDeliveryError("");
+        setReceipt(current=>current?.messageId===receipt.messageId?{...current,status:result.status,reason:result.reason}:current);
+        if(smsDelivery(result.status,result.reason).terminal)window.clearInterval(timer);
+      }catch{if(!cancelled)setDeliveryError("Delivery check unavailable. Your message was submitted; check its status before retrying.");}
+    },5000);
+    return()=>{cancelled=true;window.clearInterval(timer);};
+  },[receipt?.messageId]);
   const send = async () => {
-    if ((!text.trim() && !image) || !window.confirm(`Send this ${image ? "picture message" : "SMS"} now?`)) return;
+    if (sending.current || (!text.trim() && !image) || !window.confirm(`Send this ${image ? "picture message" : "SMS"} now?`)) return;
+    sending.current=true;
     setBusy(true); setError("");
     try {
       let mediaUrl = "";
@@ -1656,11 +1720,14 @@ function SmsComposer({ contactId, reload }: { contactId: number; reload: () => P
       const r = await fetch("/api/telnyx/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({contactId,text,mediaUrl,idempotencyKey:crypto.randomUUID()})});
       const result = await r.json() as Rec;
       if (!r.ok) throw Error(result.error || "Could not send SMS.");
-      setText(""); setImage(null); await reload();
+      setReceipt({...result,body:text});setDeliveryError("");
+      if(!smsDelivery(result.status,result.reason).failed){setText("");setImage(null);}
+      // A refresh failure must never turn an accepted send into a send error.
+      try { await reload(); } catch { setDeliveryError("Message submitted. Refresh the CRM to update its history."); }
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not send SMS."); }
-    finally { setBusy(false); }
+    finally { sending.current=false;setBusy(false); }
   };
-  return <div className="sms-edit contact-sms-composer" id="contact-sms-composer"><label>Send a text or picture message<textarea aria-label="Write SMS" value={text} maxLength={1600} rows={5} onChange={e => setText(e.target.value)} /></label><div className="sms-compose-actions"><label>Attach image<input type="file" accept="image/jpeg,image/png,image/gif" onChange={e => setImage(e.target.files?.[0] || null)} /></label><button disabled={busy || (!text.trim() && !image)} onClick={send}>{busy ? "Sending…" : image ? "Send picture message" : "Send SMS"}</button></div>{image && <small>Attached: {image.name}</small>}{error && <p role="alert">{error}</p>}</div>;
+  return <div className="sms-edit contact-sms-composer" id="contact-sms-composer"><label>Send a text or picture message<textarea aria-label="Write SMS" disabled={busy} value={text} maxLength={1600} rows={5} onChange={e => setText(e.target.value)} /></label><div className="sms-compose-actions"><label>Attach image<input type="file" disabled={busy} accept="image/jpeg,image/png,image/gif" onChange={e => setImage(e.target.files?.[0] || null)} /></label><button type="button" className="sms-send-button" disabled={busy || (!text.trim() && !image)} onClick={send}>{busy ? "Sending…" : image ? "Send picture message" : "Send SMS"}</button></div>{image && <small>Attached: {image.name}</small>}{error && <p role="alert">{error}</p>}{receipt&&<div className="sms-send-receipt" role="status"><strong>{smsDelivery(receipt.status,receipt.reason).label}</strong><span>To: {receipt.to} · Status: {receipt.status||"queued"}</span>{receipt.body&&<p>{receipt.body}</p>}<button type="button" disabled={checking} onClick={checkDelivery}>{checking?"Checking…":"Check delivery"}</button>{deliveryError&&<p>{deliveryError}</p>}</div>}</div>;
 }
 
 function SmsIntelligence({ contactId, channel = "sms", suggestions, reload }: { contactId: number; channel?: "sms" | "email"; suggestions: Rec[]; reload: () => Promise<void> }) {
@@ -1795,7 +1862,9 @@ function TimelineRecord({ c, item, act }: { c: Rec; item: Rec; act: (p: Rec) => 
   if (typeof item.participants === "string") {
     try { participants = JSON.parse(item.participants); } catch { /* Older records may not have structured participants. */ }
   }
-  const images = isText && Array.isArray(participants.media) ? participants.media.filter((media: Rec) => typeof media.url === "string" && /^\/api\/telnyx\/media\/[0-9a-f]{64}$/.test(new URL(media.url,"https://claus-crm.bclaus.chatgpt.site").pathname) && new URL(media.url,"https://claus-crm.bclaus.chatgpt.site").origin === "https://claus-crm.bclaus.chatgpt.site") : [];
+  const images = isText && Array.isArray(participants.media) ? participants.media.filter((media: Rec) => {
+    try { const url=new URL(media.url,"https://claus-crm.bclaus.chatgpt.site");return url.origin==="https://claus-crm.bclaus.chatgpt.site"&&/^\/api\/telnyx\/media\/[0-9a-f]{64}$/.test(url.pathname); } catch { return false; }
+  }) : [];
   const icon = lower.includes("text") || lower.includes("sms") ? <MessageSquare />
     : lower.includes("email") ? <Mail />
       : lower.includes("task") || lower.includes("appointment") ? <CheckSquare />
@@ -1849,11 +1918,16 @@ function TimelineRecord({ c, item, act }: { c: Rec; item: Rec; act: (p: Rec) => 
         } finally { setNoteBusy(false); }
       }}><label>Edit note<textarea aria-label="Edit note" required autoFocus maxLength={20000} rows={6} value={noteBody} onChange={e => setNoteBody(e.target.value)} /></label><button type="submit" disabled={noteBusy || !noteBody.trim()}>{noteBusy ? "Saving…" : "Save changes"}</button><button type="button" disabled={noteBusy} onClick={() => setEditingNote(false)}>Cancel</button>{noteError && <p role="alert" className="error">{noteError}</p>}</form>
       : lower.includes("task") || lower.includes("appointment") ? <p>{item.title} · {item.due_date || "Date not set"} · {item.due_time || "Time not set"}</p> : <p>{item.body || item.message_transcript || item.detail || item.title || (isText && participants.body_missing ? "No visible message body" : item.original_imported_text || "Activity recorded")}</p>}
-      {images.length > 0 && <div className="sms-images">{images.map((media: Rec,index: number) => <a key={index} href={media.url} target="_blank" rel="noreferrer"><img src={media.url} alt="Text message image" loading="lazy" /></a>)}</div>}
+      {images.length > 0 && <div className="sms-images">{images.map((media: Rec,index: number) => <a key={index} href={media.url} target="_blank" rel="noreferrer">{String(media.content_type||"image/jpeg").startsWith("image/")?<img src={media.url} alt="Text message image" loading="lazy" />:"Open PDF attachment"}</a>)}</div>}
+      {isText && direction==="inbound" && (participants.media_pending || participants.media_failures?.length>0 || (!images.length && !participants.media_checked_at)) && <div className="sms-attachment-recovery">
+        {participants.media_pending&&<p>Image attachments are being saved. Use recovery if they do not appear.</p>}
+        {participants.media_failures?.length>0&&<p role="alert">{participants.media_failures.length} attachment(s) could not be saved. {participants.media_failures.map((failure:Rec)=>failure.reason).join(" ")}</p>}
+        <button type="button" disabled={draftBusy} onClick={async()=>{setDraftBusy(true);setDraftError("");try{const response=await fetch("/api/telnyx/media/recover",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({contactId:Number(c.id),communicationId:Number(item.id)})});const result=await response.json() as Rec;if(!response.ok)throw Error(result.error||"Could not recover attachments.");await reload();if(result.failed)setDraftError("Some attachments could not be recovered. The provider link may have expired or the file format may not be supported.");else if(!result.updated)setDraftError("Telnyx did not return any attachments for this message.");}catch(error){setDraftError(error instanceof Error?error.message:"Could not recover attachments.");}finally{setDraftBusy(false);}}}>{draftBusy?"Checking…":"Check / recover attachments"}</button>
+      </div>}
       {isContactNote && !editingNote && <button type="button" onClick={() => {setNoteBody(String(item.body || ""));setNoteError("");setEditingNote(true);}}>Edit note</button>}
       {item.imported === 1 && <span className="imported-label">Imported from {item.source_system || "FUB"}</span>}
       {(isText || lower.includes("email")) && direction === "inbound" && !!item.message_transcript && !draftText && <button type="button" disabled={draftBusy} onClick={() => suggest()}>{draftBusy ? "Drafting…" : "Suggest response"}</button>}
-      {draftText && <div className="sms-edit"><label>Suggested response (review before sending)<textarea aria-label="Edit suggested SMS" value={draftText} onChange={e => setDraftText(e.target.value)} /></label>{isText && <button disabled={draftBusy} onClick={sendDraft}>Send SMS</button>}<button disabled={draftBusy} onClick={() => suggest(true)}>Regenerate</button><button disabled={draftBusy} onClick={() => { setDraftText(""); setDraftId(null); }}>Dismiss</button></div>}
+      {draftText && <div className="sms-edit"><label>Suggested response (review before sending)<textarea aria-label="Edit suggested SMS" value={draftText} onChange={e => setDraftText(e.target.value)} /></label>{isText && <button type="button" className="sms-send-button" disabled={draftBusy} onClick={sendDraft}>Send SMS</button>}<button disabled={draftBusy} onClick={() => suggest(true)}>Regenerate</button><button disabled={draftBusy} onClick={() => { setDraftText(""); setDraftId(null); }}>Dismiss</button></div>}
       {draftError && <p role="alert" className="error">{draftError}</p>}
     </div>
   </article>;

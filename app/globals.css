@@ -2403,6 +2403,9 @@ body .empty-icon {
 .sms-edit label { display: grid; gap: 4px; font-size: max(12px, calc(13px + var(--contact-font-increase, 0px))); }
 .sms-edit input { background: #18271d; border: 1px solid #3d8550; border-radius: 6px; padding: 7px; color: #fff; }
 .contact-sms-composer { display: grid; width: 100%; margin: 12px 0; }
+.sms-send-receipt { display: grid; gap: 8px; padding: 14px; border: 1px solid #6baa75; border-radius: 8px; background: #173321; overflow-wrap: anywhere; }
+.sms-send-receipt p { margin: 0; white-space: pre-wrap; }
+.sms-send-receipt button { justify-self: start; min-height: 44px; padding: 8px 14px; border: 1px solid #83ce92; border-radius: 7px; color: #fff; background: #27663b; cursor: pointer; font: inherit; }
 .contact-sms-composer > label, .contact-sms-composer textarea { width: 100%; min-width: 0; box-sizing: border-box; }
 .contact-sms-composer textarea { min-height: 130px; resize: vertical; padding: 12px; background: #18271d; color: white; border: 1px solid #3d8550; border-radius: 7px; font: inherit; }
 .sms-compose-actions { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
@@ -2600,3 +2603,37 @@ body .timeline-filters button.active {
 /* Task notes use the same saved task on Contacts and Today. */
 .task-card-notes { display: block; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; font-size: 14px; margin-top: 4px; }
 .sidebar-task-copy .task-card-notes { color: #cfdbd2; }
+
+.lead-settings section,.lead-cards article{border-top:1px solid #315e3e;padding:18px 0}.lead-settings label{display:block;margin:12px 0}.lead-settings input,.lead-settings select{max-width:100%;padding:10px}.lead-settings details summary,.lead-settings button,.lead-cards button,.lead-button{display:inline-block;background:#173d27;border:1px solid #4c9567;border-radius:8px;padding:10px 14px;color:#fff;cursor:pointer;font-size:14px;min-height:44px;text-decoration:none;margin:5px 5px 5px 0}.lead-actions{display:flex;flex-wrap:wrap}.lead-settings p,.lead-cards p{overflow-wrap:anywhere;font-size:14px;line-height:1.5}.lead-cards small{display:block;font-size:14px}.lead-cards{margin-bottom:20px}
+
+/* Keep send actions visibly actionable in every SMS composer. */
+.sms-edit button.sms-send-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 10px 20px;
+  border: 1px solid #83ce92;
+  border-radius: 8px;
+  background: #27663b;
+  color: #fff;
+  font: inherit;
+  font-size: max(14px, 1em);
+  font-weight: 600;
+  line-height: 1.4;
+  box-shadow: 0 2px 4px #0003;
+  cursor: pointer;
+}
+.sms-edit button.sms-send-button:hover:not(:disabled) { background: #327c49; }
+.sms-edit button.sms-send-button:focus-visible { outline: 3px solid #bcff32; outline-offset: 3px; }
+.sms-edit button.sms-send-button:disabled { opacity: .55; cursor: not-allowed; }
+@media (max-width: 700px) {
+  .sms-compose-actions { align-items: stretch; }
+  .sms-compose-actions .sms-send-button { width: 100%; }
+}
+
+.sms-attachment-recovery { margin: 10px 0; padding: 10px; border: 1px solid #6baa75; border-radius: 8px; }
+.sms-attachment-recovery button { min-height:44px; padding:8px 14px; border:1px solid #83ce92; border-radius:7px; color:white; background:#27663b; cursor:pointer; font:inherit; }
+.sms-attachment-recovery button:disabled { opacity:.55; cursor:wait; }
+
+.manual-campaign-enrollment{display:grid;gap:12px;margin-top:16px;padding:16px;border:1px solid #4f8b60;border-radius:10px}.manual-campaign-enrollment>label:not(.campaign-checkbox){display:grid;gap:6px}.manual-campaign-enrollment select,.manual-campaign-enrollment textarea{width:100%;min-width:0;min-height:44px;font-size:16px}.manual-campaign-enrollment button{min-height:44px}

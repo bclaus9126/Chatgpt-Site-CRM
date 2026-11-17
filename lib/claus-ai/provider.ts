@@ -65,14 +65,21 @@ async function jsonResponse(url: string, init: RequestInit, provider: Provider) 
   } finally { clearTimeout(timeout); }
 }
 
-async function request(provider: Provider, system: string, user: string, maxOutput: number) {
+async function request(provider: Provider, system: string, user: string, maxOutput: number, taskType?: string) {
   const { model, key } = provider;
   const messages = [{ role: "system", content: system }, { role: "user", content: user }];
   let result: Record<string, any>;
   if (provider.provider === "openai" || provider.provider === "mistral") {
     result = await jsonResponse(provider.provider === "openai" ? "https://api.openai.com/v1/chat/completions" : "https://api.mistral.ai/v1/chat/completions", {
       method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify(provider.provider === "openai" ? { model, messages, max_completion_tokens: maxOutput } : { model, messages, temperature: 0.1, max_tokens: maxOutput }),
+      body: JSON.stringify(provider.provider === "openai" ? {
+        model, messages, max_completion_tokens: maxOutput,
+        // Draft caps are for visible JSON, not an internal reasoning budget.
+        ...(["sms_draft", "email_draft"].includes(taskType || "") ? {
+          ...(/^gpt-5\.6(?:-|$)/i.test(model) ? { reasoning_effort: "none" } : {}),
+          response_format: { type: "json_object" },
+        } : {}),
+      } : { model, messages, temperature: 0.1, max_tokens: maxOutput }),
     }, provider);
     return { text: String(result.choices?.[0]?.message?.content || ""), usage: result.usage };
   }
@@ -97,8 +104,11 @@ export async function complete(system: string, user: string, tier: Tier, metadat
   const config = aiConfig()[tier];
   const { result, selected, fallbackUsed } = await executeTier(config, async (provider: Provider) => {
     return meteredRequest({ provider: provider.provider, model: provider.model, tier, taskType: metadata.taskType || tier, system, prompt: user, contactId: metadata.contactId, sourceId: metadata.sourceId }, async maxOutput => {
-      const result = await request(provider, system, user, maxOutput);
-      if (!result.text.trim()) throw new ProviderFailure(503, "Provider returned no answer");
+      const result = await request(provider, system, user, maxOutput, metadata.taskType);
+      if (!result.text.trim()) {
+        console.error("Claus AI returned no text", {provider:provider.provider,model:provider.model,taskType:metadata.taskType,maxOutput});
+        throw new Error("AI_EMPTY_RESPONSE");
+      }
       const usage = result.usage || {};
       const actualUsd = Number(usage.cost_usd ?? usage.cost ?? NaN);
       return { value: result, usage: {
